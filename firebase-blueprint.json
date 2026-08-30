@@ -1,0 +1,193 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User account profile and balance record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "accountType": { "type": "string" },
+        "balance": { "type": "number" },
+        "demoBalance": { "type": "number" },
+        "registeredEmail": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "isBlocked": { "type": "boolean" }
+      },
+      "required": ["id", "name", "phone", "accountType", "balance"]
+    },
+    "TradePool": {
+      "title": "TradePool",
+      "description": "Crowdsourced trading pool document",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "targetAmount": { "type": "number" },
+        "status": { "type": "string" },
+        "tradeDurationMinutes": { "type": "number" },
+        "returnsPercentage": { "type": "number" },
+        "profitDistributionPercentage": { "type": "number" },
+        "totalInvested": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "targetAmount", "status"]
+    },
+    "WalletTransaction": {
+      "title": "WalletTransaction",
+      "description": "Deposit and withdrawal requests",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "type": { "type": "string" },
+        "amount": { "type": "number" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "type", "amount", "status"]
+    },
+    "SupportMessage": {
+      "title": "SupportMessage",
+      "description": "Support tickets and user feedback",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "message": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "userId", "message"]
+    },
+    "SoloTrade": {
+      "title": "SoloTrade",
+      "description": "Individual binary options trade document",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "assetPair": { "type": "string" },
+        "tradeType": { "type": "string" },
+        "stake": { "type": "number" },
+        "entryPrice": { "type": "number" },
+        "durationSeconds": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "userId", "assetPair", "tradeType", "stake", "status"]
+    },
+    "ArchivedWalletTransaction": {
+      "title": "ArchivedWalletTransaction",
+      "description": "Historical wallet transaction records (>12 months)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "type": { "type": "string" },
+        "amount": { "type": "number" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "archivedAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "type", "amount", "status"]
+    },
+    "ArchivedSoloTrade": {
+      "title": "ArchivedSoloTrade",
+      "description": "Historical binary options solo trades (>12 months)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "assetPair": { "type": "string" },
+        "tradeType": { "type": "string" },
+        "stake": { "type": "number" },
+        "entryPrice": { "type": "number" },
+        "status": { "type": "string" },
+        "archivedAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "assetPair", "tradeType", "stake", "status"]
+    },
+    "HrManagerAccount": {
+      "title": "HrManagerAccount",
+      "description": "HR & Payroll Manager and Owner administrative accounts",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "email", "name", "role"]
+    },
+    "EmployeeProfile": {
+      "title": "EmployeeProfile",
+      "description": "Staff employee profile details",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "employeeCode": { "type": "string" },
+        "fullName": { "type": "string" },
+        "email": { "type": "string" },
+        "designation": { "type": "string" },
+        "department": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "employeeCode", "fullName", "email", "designation", "department"]
+    },
+    "MonthlyPayrollRun": {
+      "title": "MonthlyPayrollRun",
+      "description": "Monthly payroll execution batch document",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "monthYear": { "type": "string" },
+        "totalEmployeesCount": { "type": "number" },
+        "totalNetPayout": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "monthYear", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profiles collection"
+    },
+    "/pools/{poolId}": {
+      "schema": { "$ref": "#/entities/TradePool" },
+      "description": "Trade pools collection"
+    },
+    "/wallet_transactions/{txId}": {
+      "schema": { "$ref": "#/entities/WalletTransaction" },
+      "description": "Wallet transaction records"
+    },
+    "/support_messages/{msgId}": {
+      "schema": { "$ref": "#/entities/SupportMessage" },
+      "description": "Support tickets"
+    },
+    "/solo_trades/{tradeId}": {
+      "schema": { "$ref": "#/entities/SoloTrade" },
+      "description": "Binary options solo trades"
+    },
+    "/archived_wallet_transactions/{txId}": {
+      "schema": { "$ref": "#/entities/ArchivedWalletTransaction" },
+      "description": "Archived wallet transaction history (>12 months)"
+    },
+    "/archived_solo_trades/{tradeId}": {
+      "schema": { "$ref": "#/entities/ArchivedSoloTrade" },
+      "description": "Archived binary options solo trades (>12 months)"
+    },
+    "/hr_managers/{managerId}": {
+      "schema": { "$ref": "#/entities/HrManagerAccount" },
+      "description": "HR and Payroll Managers accounts"
+    },
+    "/hr_employees/{employeeId}": {
+      "schema": { "$ref": "#/entities/EmployeeProfile" },
+      "description": "Staff employee profiles"
+    },
+    "/hr_payroll_runs/{runId}": {
+      "schema": { "$ref": "#/entities/MonthlyPayrollRun" },
+      "description": "Monthly payroll batches"
+    }
+  }
+}

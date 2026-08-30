@@ -1,0 +1,6 @@
+{
+  "name": "Shared Trade Pool",
+  "description": "Fractional Trade Participation system allowing multiple users to jointly fund trades with Firestore tracking, real-time balances, and transactions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

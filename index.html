@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Shared Trade Pool - FTP</title>
+    
+    <!-- PWA & Mobile Icons -->
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    
+    <!-- Mobile Web App Capable -->
+    <meta name="theme-color" content="#4B00FF" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="FTP Trade" />
+    
+    <script>
+      (function() {
+        try {
+          var saved = localStorage.getItem('theme');
+          if (saved === 'light') {
+            document.documentElement.classList.remove('dark');
+            document.documentElement.style.colorScheme = 'light';
+          } else {
+            document.documentElement.classList.add('dark');
+            document.documentElement.style.colorScheme = 'dark';
+          }
+        } catch (e) {}
+      })();
+
+      // Unregister any old service worker that might cache stale broken chunks
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(registrations) {
+          for (var i = 0; i < registrations.length; i++) {
+            registrations[i].update();
+          }
+        }).catch(function(e) {
+          console.log('SW update check:', e);
+        });
+      }
+
+      // Catch top-level unhandled errors before React mounts
+      window.addEventListener('error', function(e) {
+        console.error('Top-level bootstrap error:', e.error || e.message);
+        var fallback = document.getElementById('ftp-loading-fallback');
+        if (fallback) {
+          var errText = document.getElementById('ftp-loading-status');
+          if (errText) {
+            errText.innerHTML = '<span style="color:#f87171;font-weight:700;">Loading notice</span><br><span style="font-size:10px;color:#94a3b8;margin-top:6px;display:block;">Tap below to refresh app cache</span><button onclick="localStorage.clear();sessionStorage.clear();window.location.reload();" style="margin-top:12px;padding:8px 16px;background:#4f46e5;color:#fff;border:none;border-radius:10px;font-size:11px;font-weight:700;cursor:pointer;">🔄 Reset & Refresh</button>';
+          }
+        }
+      });
+    </script>
+  </head>
+  <body class="bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 antialiased selection:bg-indigo-500 selection:text-white" style="margin: 0;">
+    <div id="root">
+      <div id="ftp-loading-fallback" style="min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; background-color: #020617; color: #ffffff; font-family: system-ui, -apple-system, sans-serif; padding: 20px; text-align: center;">
+        <div style="width: 68px; height: 68px; border-radius: 20px; background: linear-gradient(135deg, #4f46e5 0%, #312e81 100%); display: flex; align-items: center; justify-content: center; box-shadow: 0 10px 25px rgba(79, 70, 229, 0.4); margin-bottom: 18px;">
+          <span style="font-weight: 900; font-size: 24px; letter-spacing: -0.5px; color: #ffffff;">FTP</span>
+        </div>
+        <div style="font-weight: 800; font-size: 16px; letter-spacing: 0.5px; margin-bottom: 4px; color: #f8fafc;">
+          Shared Trade Pool
+        </div>
+        <div id="ftp-loading-status" style="font-size: 11px; font-weight: 600; color: #818cf8; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 20px;">
+          Loading Terminal...
+        </div>
+        <div style="width: 28px; height: 28px; border: 3px solid rgba(255, 255, 255, 0.12); border-top-color: #818cf8; border-radius: 50%; animation: ftp-spin 0.75s linear infinite;"></div>
+        <style>
+          @keyframes ftp-spin {
+            to { transform: rotate(360deg); }
+          }
+        </style>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
