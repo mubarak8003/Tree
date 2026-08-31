@@ -115,19 +115,25 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   const adminEmail = currentAdminAccount?.email || "admin@system.local";
 
-  const tabs: { id: AdminTabType; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-    { id: "settlement", label: "Pool Settlements", icon: Activity },
-    { id: "approvals", label: "Wallet Approvals", icon: ClipboardList },
-    { id: "users", label: "Users & Wallets", icon: Users },
-    { id: "solo_trading", label: "Solo Trading Engine", icon: Zap },
-    { id: "limits", label: "Transaction Limits", icon: Sliders },
-    { id: "balance_report", label: "Balance & PnL Report", icon: Scale },
+  const tabs: { 
+    id: AdminTabType; 
+    label: string; 
+    icon: React.ComponentType<{ className?: string }>; 
+    badge?: string; 
+    count?: number; 
+  }[] = [
+    { id: "settlement", label: "Settlement", icon: Activity },
+    { id: "approvals", label: "Approvals", icon: ClipboardList },
+    { id: "users", label: "Users List", icon: Users },
+    { id: "solo_trading", label: "Solo Engine", icon: Zap, badge: soloConfig?.isEnabled ? "ON" : "OFF" },
+    { id: "limits", label: "Parameters", icon: Sliders },
+    { id: "balance_report", label: "Balance & PnL", icon: Scale },
     { id: "market_monitor", label: "Market Monitor", icon: BarChart2 },
-    { id: "support", label: "Help Desk", icon: MessageSquare },
+    { id: "support", label: "Support", icon: MessageSquare, count: supportMessages.filter((m) => m.status === "OPEN").length },
     { id: "config", label: "System Config", icon: Settings },
     { id: "rbac_staff", label: "Staff & RBAC", icon: Shield },
-    { id: "logs", label: "Audit Logs", icon: ShieldCheck },
-    { id: "archive", label: "DB Archiving", icon: Archive },
+    { id: "logs", label: "Tx Logs", icon: ShieldCheck },
+    { id: "archive", label: "DB Archive", icon: Archive },
   ];
 
   return (
@@ -151,6 +157,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               >
                 <Icon className="h-4 w-4 shrink-0" />
                 <span>{tab.label}</span>
+                {tab.badge && (
+                  <span className={`px-1.5 py-0.2 rounded-md text-[10px] font-black uppercase ${
+                    tab.badge === "ON" ? "bg-emerald-500 text-white" : "bg-rose-500 text-white"
+                  }`}>
+                    {tab.badge}
+                  </span>
+                )}
+                {tab.count !== undefined && tab.count > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-amber-500 text-white font-bold">
+                    {tab.count}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -179,6 +197,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         {activeTab === "users" && (
           <UsersTab
             allUsers={allUsers}
+            walletTransactions={walletTransactions}
+            allPools={allPools}
+            allSoloTrades={allSoloTrades}
             onTriggerNotification={onTriggerNotification}
             adminEmail={adminEmail}
           />
@@ -187,6 +208,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         {activeTab === "solo_trading" && (
           <SoloTradingTab
             soloConfig={soloConfig}
+            allSoloTrades={allSoloTrades}
             onTriggerNotification={onTriggerNotification}
             adminEmail={adminEmail}
           />

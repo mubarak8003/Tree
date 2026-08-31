@@ -2671,9 +2671,20 @@ export async function toggleBlockUser(userId: string, isBlocked: boolean): Promi
       const data = snap.data();
       const isTargetAdmin =
         data.isAdmin === true ||
+        (data.role && ["admin", "ADMIN", "OWNER", "SUPER_ADMIN", "STAFF", "super_admin", "staff"].includes(data.role)) ||
         data.id === "admin" ||
         data.id === "user_a" ||
-        (data.email && (data.email.toLowerCase() === "amaizy1@gmail.com" || data.email.toLowerCase().includes("admin")));
+        data.id === "acc_owner_1" ||
+        data.id === "acc_super_1" ||
+        userId === "admin" ||
+        userId === "user_a" ||
+        (data.email && (
+          data.email.toLowerCase() === "amaizy1@gmail.com" ||
+          data.email.toLowerCase() === "superadmin@trading.com" ||
+          data.email.toLowerCase() === "payments@trading.com" ||
+          data.email.toLowerCase().includes("admin") ||
+          data.email.toLowerCase().startsWith("admin")
+        ));
       if (isTargetAdmin) {
         throw new Error("Admin account cannot be blocked! (एडमिन अकाउंट ब्लॉक नहीं किया जा सकता)");
       }
@@ -2692,14 +2703,62 @@ export async function deleteUserProfile(userId: string): Promise<void> {
     const data = snap.data();
     const isTargetAdmin =
       data.isAdmin === true ||
+      (data.role && ["admin", "ADMIN", "OWNER", "SUPER_ADMIN", "STAFF", "super_admin", "staff"].includes(data.role)) ||
       data.id === "admin" ||
       data.id === "user_a" ||
-      (data.email && (data.email.toLowerCase() === "amaizy1@gmail.com" || data.email.toLowerCase().includes("admin")));
+      data.id === "acc_owner_1" ||
+      data.id === "acc_super_1" ||
+      userId === "admin" ||
+      userId === "user_a" ||
+      (data.email && (
+        data.email.toLowerCase() === "amaizy1@gmail.com" ||
+        data.email.toLowerCase() === "superadmin@trading.com" ||
+        data.email.toLowerCase() === "payments@trading.com" ||
+        data.email.toLowerCase().includes("admin") ||
+        data.email.toLowerCase().startsWith("admin")
+      ));
     if (isTargetAdmin) {
       throw new Error("Admin account cannot be deleted! (एडमिन अकाउंट को डिलीट नहीं किया जा सकता)");
     }
   }
   await deleteDoc(userRef);
+}
+
+/**
+ * Admin utility to regenerate a fresh 6-digit Secret Login PIN for a trader account.
+ * Updates bcrypt hash (loginPinHash), resets failed login attempts & lockouts, and returns plain PIN for Admin to view/share.
+ */
+export async function regenerateUserLoginPin(
+  userId: string
+): Promise<{ pin: string; userId: string; userEmail: string; userName: string; phone?: string }> {
+  const userRef = doc(db, "users", userId);
+  const snap = await getDoc(userRef);
+  if (!snap.exists()) {
+    throw new Error("User account not found!");
+  }
+  const userData = snap.data();
+  
+  // Generate random 6-digit PIN
+  const pin = Math.floor(100000 + Math.random() * 900000).toString();
+  const pinHash = bcrypt.hashSync(pin, 10);
+  const nowISO = new Date().toISOString();
+
+  await updateDoc(userRef, {
+    loginPinHash: pinHash,
+    pinGeneratedAt: nowISO,
+    loginAttempts: 0,
+    loginLockedUntil: null,
+    verificationPin: pin,
+    updatedAt: nowISO
+  });
+
+  return {
+    pin,
+    userId: snap.id,
+    userEmail: userData.email || "",
+    userName: userData.name || "Trader",
+    phone: userData.phone || userData.mobileNumber || ""
+  };
 }
 
 /**
