@@ -1643,68 +1643,94 @@ export async function verifyAdminSecurityPin(pinInput: string): Promise<boolean>
  * Update Admin Password & 6-Digit Security PIN (stored as bcrypt hashes)
  */
 export async function updateAdminPasswordAndPin(
-  currentPin: string,
-  currentPassword?: string,
+  currentPinOrPassword: string,
   newPassword?: string,
-  newPin?: string
+  newPin?: string,
+  currentPasswordSecondary?: string
 ): Promise<void> {
-  // 1. Verify 6-digit PIN
-  const pinValid = await verifyAdminSecurityPin(currentPin);
-  if (!pinValid) {
-    throw new Error("Current 6-digit Admin Security PIN is incorrect.");
+  const cleanInput = (currentPinOrPassword || "").trim();
+  const secondaryInput = (currentPasswordSecondary || "").trim();
+
+  if (!cleanInput && !secondaryInput) {
+    throw new Error("Current Admin Password or 6-digit Security PIN is required for authorization.");
   }
 
-  // 2. Verify current password if changing password or if currentPassword is supplied
-  if (newPassword && newPassword.trim()) {
-    if (!currentPassword || !currentPassword.trim()) {
-      throw new Error("Current Admin Password is required when updating your Password.");
-    }
-    const authRef = doc(db, "app_settings", "admin_auth_state");
-    const authSnap = await getDoc(authRef);
-    let passHash = authSnap.exists() && authSnap.data().passwordHash
-      ? authSnap.data().passwordHash
-      : bcrypt.hashSync("Admin@1234", 10);
+  // 1. Fetch current auth state from Firestore
+  const authRef = doc(db, "app_settings", "admin_auth_state");
+  const authSnap = await getDoc(authRef);
+  
+  let storedPassHash = authSnap.exists() && authSnap.data().passwordHash
+    ? authSnap.data().passwordHash
+    : bcrypt.hashSync("Admin@1234", 10);
 
-    let isPassValid = bcrypt.compareSync(currentPassword.trim(), passHash);
-    if (!isPassValid) {
-      throw new Error("Current Admin Password is incorrect.");
-    }
-  } else if (currentPassword && currentPassword.trim()) {
-    const authRef = doc(db, "app_settings", "admin_auth_state");
-    const authSnap = await getDoc(authRef);
-    let passHash = authSnap.exists() && authSnap.data().passwordHash
-      ? authSnap.data().passwordHash
-      : bcrypt.hashSync("Admin@1234", 10);
+  let storedPinHash = authSnap.exists() && authSnap.data().pinHash
+    ? authSnap.data().pinHash
+    : bcrypt.hashSync("123456", 10);
 
-    let isPassValid = bcrypt.compareSync(currentPassword.trim(), passHash);
-    if (!isPassValid) {
-      throw new Error("Current Admin Password is incorrect.");
+  // Check if credentials match either passwordHash or pinHash
+  let isAuthorized = false;
+
+  if (cleanInput) {
+    if (bcrypt.compareSync(cleanInput, storedPinHash) || bcrypt.compareSync(cleanInput, storedPassHash)) {
+      isAuthorized = true;
     }
   }
 
-  // 3. Ensure new PIN is not identical to current PIN
+  if (!isAuthorized && secondaryInput) {
+    if (bcrypt.compareSync(secondaryInput, storedPassHash) || bcrypt.compareSync(secondaryInput, storedPinHash)) {
+      isAuthorized = true;
+    }
+  }
+
+  // Also check admin_accounts collection if not authorized yet
+  if (!isAuthorized) {
+    try {
+      const adminAccsCol = collection(db, "admin_accounts");
+      const accsSnap = await getDocs(adminAccsCol);
+      for (const docSnap of accsSnap.docs) {
+        const d = docSnap.data();
+        if (d.passwordHash && (bcrypt.compareSync(cleanInput, d.passwordHash) || (secondaryInput && bcrypt.compareSync(secondaryInput, d.passwordHash)))) {
+          isAuthorized = true;
+          break;
+        }
+        if (d.pinHash && (bcrypt.compareSync(cleanInput, d.pinHash) || (secondaryInput && bcrypt.compareSync(secondaryInput, d.pinHash)))) {
+          isAuthorized = true;
+          break;
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (!isAuthorized) {
+    throw new Error("Current Admin Password or Security PIN is incorrect.");
+  }
+
+  // 2. Validate new PIN if provided
   if (newPin && newPin.trim()) {
-    if (newPin.trim() === currentPin.trim()) {
-      throw new Error("New 6-digit Security PIN cannot be the same as the Current Security PIN.");
+    const cleanNewPin = newPin.trim();
+    if (cleanNewPin === cleanInput || cleanNewPin === secondaryInput) {
+      throw new Error("New 6-digit Security PIN cannot be the same as your Current PIN.");
     }
-    const pinVal = validateSecurityPinFormat(newPin.trim());
+    const pinVal = validateSecurityPinFormat(cleanNewPin);
     if (!pinVal.isValid) {
       throw new Error(pinVal.message);
     }
   }
 
-  // 4. Ensure new password is not identical to current password
+  // 3. Validate new password if provided
   if (newPassword && newPassword.trim()) {
-    if (currentPassword && newPassword.trim() === currentPassword.trim()) {
-      throw new Error("New Password cannot be the same as the Current Password.");
+    const cleanNewPass = newPassword.trim();
+    if (cleanNewPass === cleanInput || cleanNewPass === secondaryInput) {
+      throw new Error("New Password cannot be the same as your Current Password.");
     }
-    const pwdVal = validatePasswordStrength(newPassword.trim());
-    if (!pwdVal.isValid) {
-      throw new Error(pwdVal.message);
+    if (cleanNewPass.length < 6) {
+      throw new Error("New Password must be at least 6 characters long.");
     }
   }
 
-  const updates: Partial<AdminAuthState> = {};
+  const updates: Partial<AdminAuthState> = {
+    updatedAt: new Date().toISOString()
+  };
 
   if (newPassword && newPassword.trim()) {
     updates.passwordHash = bcrypt.hashSync(newPassword.trim(), 10);
@@ -1714,11 +1740,10 @@ export async function updateAdminPasswordAndPin(
     updates.pinHash = bcrypt.hashSync(newPin.trim(), 10);
   }
 
-  if (Object.keys(updates).length === 0) {
-    throw new Error("Provide a new Password or new 6-digit Security PIN to update.");
+  if (Object.keys(updates).length <= 1) {
+    throw new Error("Please enter a New Password or New 6-Digit Security PIN to update.");
   }
 
-  const authRef = doc(db, "app_settings", "admin_auth_state");
   await setDoc(authRef, updates, { merge: true });
 
   // Sync updated passwordHash / pinHash into admin_accounts collection in Firestore as well
@@ -1726,7 +1751,7 @@ export async function updateAdminPasswordAndPin(
     const adminAccsCol = collection(db, "admin_accounts");
     const accsSnap = await getDocs(adminAccsCol);
     if (!accsSnap.empty) {
-      const rbacUpdates: any = {};
+      const rbacUpdates: any = { updatedAt: new Date().toISOString() };
       if (updates.passwordHash) rbacUpdates.passwordHash = updates.passwordHash;
       if (updates.pinHash) rbacUpdates.pinHash = updates.pinHash;
 

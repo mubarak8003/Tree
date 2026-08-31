@@ -61,6 +61,7 @@ export interface AdminAuthState {
   lastLoginAt: string | null;
   lastActivityAt: string | null;
   currentAccountId?: string;
+  updatedAt?: string;
 }
 
 export interface AdminAuditLog {

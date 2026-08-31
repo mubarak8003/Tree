@@ -5,7 +5,8 @@ import {
 import { 
   Zap, Save, RefreshCw, Power, RotateCcw, Plus, Trash2, Edit2, 
   Search, Check, X, Shield, Clock, Sliders, DollarSign, Filter, TrendingUp, 
-  TrendingDown, AlertCircle, FileText, ChevronLeft, ChevronRight, User, History, ArrowUpRight, ArrowDownRight, Layers
+  TrendingDown, AlertCircle, FileText, ChevronLeft, ChevronRight, User, History, ArrowUpRight, ArrowDownRight, Layers,
+  Lock, Sparkles
 } from "lucide-react";
 import { 
   DEFAULT_SOLO_CATEGORIES, 
@@ -63,7 +64,7 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>("ALL");
 
-  // Modals
+  // Modals & Inline Edit States
   const [fixingPriceAsset, setFixingPriceAsset] = useState<MarketAsset | null>(null);
   const [fixedPriceValue, setFixedPriceValue] = useState<string>("");
 
@@ -71,16 +72,66 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
   const [customPairDurations, setCustomPairDurations] = useState<string>("");
 
   const [isAddingNewPairModal, setIsAddingNewPairModal] = useState(false);
-  const [newPairForm, setNewPairForm] = useState<Partial<MarketAsset>>({
+  const [newPairForm, setNewPairForm] = useState<{
+    pair: string;
+    symbol: string;
+    category: string;
+    basePrice: string | number;
+    decimals: number;
+    protectedPayoutPercentage: number;
+    standardPayoutPercentage: number;
+  }>({
     pair: "",
     symbol: "",
     category: "Crypto",
-    basePrice: 100,
+    basePrice: "",
     decimals: 2,
-    payoutPercentage: 82,
-    protectedPayoutPercentage: 75,
-    standardPayoutPercentage: 82
+    protectedPayoutPercentage: 80,
+    standardPayoutPercentage: 85
   });
+
+  // Active Pair for Editing (shown in the Edit Pair card)
+  const [editingPair, setEditingPair] = useState<MarketAsset | null>(null);
+  const [editPairForm, setEditPairForm] = useState<{
+    pair: string;
+    symbol: string;
+    category: string;
+    price: string | number;
+    decimals: number;
+    protectedPayout: number;
+    standardPayout: number;
+  }>({
+    pair: "GER 40 (DAX Index)",
+    symbol: "CURRENCYCOM:DE40",
+    category: "Indices",
+    price: 19400,
+    decimals: 2,
+    protectedPayout: 75,
+    standardPayout: 82
+  });
+
+  const [isDetectingPriceForEdit, setIsDetectingPriceForEdit] = useState(false);
+  const [isDetectingPriceForNew, setIsDetectingPriceForNew] = useState(false);
+
+  // Initialize editingPair when assets are available
+  useEffect(() => {
+    if (assets.length > 0) {
+      // Find GER 40 or first asset
+      const defaultAsset = assets.find((a) => a.symbol.includes("DE40") || a.pair.includes("GER 40")) || assets[0];
+      if (!editingPair && defaultAsset) {
+        setEditingPair(defaultAsset);
+        setEditPairForm({
+          pair: defaultAsset.pair,
+          symbol: defaultAsset.symbol,
+          category: defaultAsset.category,
+          price: defaultAsset.basePrice,
+          decimals: defaultAsset.decimals ?? 2,
+          protectedPayout: defaultAsset.protectedPayoutPercentage ?? protectedPayout,
+          standardPayout: defaultAsset.standardPayoutPercentage ?? defaultAsset.payoutPercentage ?? standardPayout
+        });
+      }
+    }
+  }, [assets]);
 
   // Subscribe to real-time config and trades
   useEffect(() => {
@@ -405,24 +456,245 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
     }
   };
 
+  // Smart Live Price Detection for Crypto (Binance), Metals, Forex & Indices
+  const detectLivePrice = async (symbolInput: string): Promise<number | null> => {
+    if (!symbolInput || !symbolInput.trim()) return null;
+    const clean = symbolInput.trim().toUpperCase();
+
+    // 1. Binance / Crypto Check
+    const binanceClean = clean.replace(/^BINANCE:/, "").replace(/[^A-Z0-9]/g, "");
+    if (binanceClean) {
+      const targetSymbol = binanceClean.endsWith("USDT") || binanceClean.endsWith("BTC") || binanceClean.endsWith("BUSD") ? binanceClean : `${binanceClean}USDT`;
+      try {
+        const res = await fetch(`https://data-api.binance.vision/api/v3/ticker/price?symbol=${targetSymbol}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.price) {
+            const p = parseFloat(data.price);
+            if (!isNaN(p) && p > 0) return p;
+          }
+        }
+      } catch (_) {}
+
+      try {
+        const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${targetSymbol}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.price) {
+            const p = parseFloat(data.price);
+            if (!isNaN(p) && p > 0) return p;
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 2. Gold / Silver Spot
+    if (clean.includes("XAU") || clean.includes("GOLD")) {
+      try {
+        const res = await fetch("https://api.gold-api.com/price/XAU");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.price && typeof data.price === "number") return data.price;
+        }
+      } catch (_) {}
+    }
+    if (clean.includes("XAG") || clean.includes("SILVER")) {
+      try {
+        const res = await fetch("https://api.gold-api.com/price/XAG");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.price && typeof data.price === "number") return data.price;
+        }
+      } catch (_) {}
+    }
+
+    // 3. Forex Rates
+    try {
+      const fxRes = await fetch("/api/market/forex");
+      if (fxRes.ok) {
+        const data = await fxRes.json();
+        if (data.rates) {
+          const rawFx = clean.replace(/^(BINANCE:|OANDA:|FX:|TVC:|CURRENCYCOM:|CAPITALCOM:)/, "").replace(/[^A-Z0-9]/g, "");
+          if (data.rates[rawFx] && typeof data.rates[rawFx] === "number") return data.rates[rawFx];
+        }
+      }
+    } catch (_) {}
+
+    // 4. Match in predefined assets
+    const match = SUPPORTED_SOLO_ASSETS.find(
+      (a) => a.symbol.toUpperCase() === clean || a.pair.toUpperCase().includes(clean) || clean.includes(a.symbol.toUpperCase())
+    );
+    if (match) {
+      return match.basePrice;
+    }
+
+    return null;
+  };
+
+  const handleDetectPriceForEdit = async () => {
+    if (!editPairForm.symbol) {
+      onTriggerNotification?.("Please enter a TradingView Symbol first.", "info");
+      return;
+    }
+    try {
+      setIsDetectingPriceForEdit(true);
+      const detected = await detectLivePrice(editPairForm.symbol);
+      if (detected !== null && detected > 0) {
+        setEditPairForm((prev) => ({ ...prev, price: detected }));
+        onTriggerNotification?.(`Live price detected for ${editPairForm.symbol}: ₹${detected}`, "success");
+      } else {
+        onTriggerNotification?.(`Could not detect live price for ${editPairForm.symbol}. Please enter manually.`, "info");
+      }
+    } catch (err: any) {
+      onTriggerNotification?.(err.message || "Failed to detect price", "error");
+    } finally {
+      setIsDetectingPriceForEdit(false);
+    }
+  };
+
+  const handleDetectPriceForNew = async () => {
+    if (!newPairForm.symbol) {
+      onTriggerNotification?.("Please enter a TradingView Symbol first.", "info");
+      return;
+    }
+    try {
+      setIsDetectingPriceForNew(true);
+      const detected = await detectLivePrice(newPairForm.symbol);
+      if (detected !== null && detected > 0) {
+        setNewPairForm((prev) => ({ ...prev, basePrice: detected }));
+        onTriggerNotification?.(`Live price detected for ${newPairForm.symbol}: ₹${detected}`, "success");
+      } else {
+        onTriggerNotification?.(`Could not auto-detect for ${newPairForm.symbol}. You can enter price or leave blank for live feed.`, "info");
+      }
+    } catch (err: any) {
+      onTriggerNotification?.(err.message || "Failed to detect price", "error");
+    } finally {
+      setIsDetectingPriceForNew(false);
+    }
+  };
+
+  const handleSelectPairForEditing = (asset: MarketAsset) => {
+    setEditingPair(asset);
+    setEditPairForm({
+      pair: asset.pair,
+      symbol: asset.symbol,
+      category: asset.category,
+      price: asset.basePrice,
+      decimals: asset.decimals ?? 2,
+      protectedPayout: asset.protectedPayoutPercentage ?? protectedPayout,
+      standardPayout: asset.standardPayoutPercentage ?? asset.payoutPercentage ?? standardPayout
+    });
+    // Smooth scroll to edit section if available
+    const el = document.getElementById("admin-edit-pair-section");
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  };
+
+  const handleSaveEditPair = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!editPairForm.pair.trim() || !editPairForm.symbol.trim()) {
+      onTriggerNotification?.("Pair display name and TradingView symbol are required.", "error");
+      return;
+    }
+    const numPrice = Number(editPairForm.price);
+    if (isNaN(numPrice) || numPrice <= 0) {
+      onTriggerNotification?.("Please enter a valid positive price.", "error");
+      return;
+    }
+
+    const targetSymbol = editingPair ? editingPair.symbol : editPairForm.symbol.trim().toUpperCase();
+    const exists = assets.find((a) => a.symbol === targetSymbol);
+
+    let updatedAssets: MarketAsset[];
+    if (exists) {
+      updatedAssets = assets.map((a) => {
+        if (a.symbol === targetSymbol) {
+          return {
+            ...a,
+            pair: editPairForm.pair.trim(),
+            symbol: editPairForm.symbol.trim().toUpperCase(),
+            category: editPairForm.category || a.category,
+            basePrice: numPrice,
+            decimals: Number(editPairForm.decimals ?? a.decimals ?? 2),
+            protectedPayoutPercentage: Number(editPairForm.protectedPayout ?? protectedPayout),
+            standardPayoutPercentage: Number(editPairForm.standardPayout ?? standardPayout),
+            payoutPercentage: Number(editPairForm.standardPayout ?? standardPayout)
+          };
+        }
+        return a;
+      });
+    } else {
+      const newAsset: MarketAsset = {
+        pair: editPairForm.pair.trim(),
+        symbol: editPairForm.symbol.trim().toUpperCase(),
+        category: editPairForm.category || "Indices",
+        basePrice: numPrice,
+        decimals: Number(editPairForm.decimals ?? 2),
+        protectedPayoutPercentage: Number(editPairForm.protectedPayout ?? protectedPayout),
+        standardPayoutPercentage: Number(editPairForm.standardPayout ?? standardPayout),
+        payoutPercentage: Number(editPairForm.standardPayout ?? standardPayout),
+        disabled: false
+      };
+      updatedAssets = [newAsset, ...assets];
+    }
+
+    try {
+      await saveSoloTradingConfig({ customAssets: updatedAssets });
+      setAssets(updatedAssets);
+      onTriggerNotification?.(`Saved changes for ${editPairForm.pair}!`, "success");
+    } catch (err: any) {
+      onTriggerNotification?.(err.message || "Failed to save trading pair", "error");
+    }
+  };
+
+  const handleLockEditPrice = async () => {
+    const numPrice = Number(editPairForm.price);
+    if (isNaN(numPrice) || numPrice <= 0) {
+      onTriggerNotification?.("Please enter a valid price to lock.", "error");
+      return;
+    }
+    const targetSymbol = editingPair ? editingPair.symbol : editPairForm.symbol.trim().toUpperCase();
+    const updatedAssets = assets.map((a) => {
+      if (a.symbol === targetSymbol || a.pair === editPairForm.pair) {
+        return {
+          ...a,
+          basePrice: numPrice
+        };
+      }
+      return a;
+    });
+    try {
+      await saveSoloTradingConfig({ customAssets: updatedAssets });
+      setAssets(updatedAssets);
+      onTriggerNotification?.(`🔒 Price locked for ${editPairForm.pair} at ₹${numPrice}`, "success");
+    } catch (err: any) {
+      onTriggerNotification?.(err.message || "Failed to lock price", "error");
+    }
+  };
+
   const handleAddNewPair = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newPairForm.pair || !newPairForm.symbol) {
-      onTriggerNotification?.("Pair name and TradingView/Binance symbol are required.", "error");
+      onTriggerNotification?.("Pair name and TradingView symbol are required.", "error");
       return;
     }
-    if (assets.some((a) => a.symbol.toUpperCase() === newPairForm.symbol!.toUpperCase())) {
+    if (assets.some((a) => a.symbol.toUpperCase() === newPairForm.symbol.trim().toUpperCase())) {
       onTriggerNotification?.("An asset with this symbol already exists.", "error");
       return;
     }
+
+    const numBasePrice = newPairForm.basePrice !== "" && !isNaN(Number(newPairForm.basePrice))
+      ? Number(newPairForm.basePrice)
+      : 100;
 
     const newAsset: MarketAsset = {
       pair: newPairForm.pair.trim(),
       symbol: newPairForm.symbol.trim().toUpperCase(),
       category: newPairForm.category || "Crypto",
-      basePrice: Number(newPairForm.basePrice || 100),
+      basePrice: numBasePrice,
       decimals: Number(newPairForm.decimals ?? 2),
-      payoutPercentage: Number(newPairForm.payoutPercentage || standardPayout),
+      payoutPercentage: Number(newPairForm.standardPayoutPercentage || standardPayout),
       protectedPayoutPercentage: Number(newPairForm.protectedPayoutPercentage || protectedPayout),
       standardPayoutPercentage: Number(newPairForm.standardPayoutPercentage || standardPayout),
       disabled: false
@@ -437,11 +709,10 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
         pair: "",
         symbol: "",
         category: "Crypto",
-        basePrice: 100,
+        basePrice: "",
         decimals: 2,
-        payoutPercentage: 82,
-        protectedPayoutPercentage: 75,
-        standardPayoutPercentage: 82
+        protectedPayoutPercentage: 80,
+        standardPayoutPercentage: 85
       });
       onTriggerNotification?.(`Added new pair ${newAsset.pair}!`, "success");
     } catch (err: any) {
@@ -1020,6 +1291,269 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
           </div>
         </div>
 
+        {/* 2-Column / Stacked Layout for EDIT PAIR and ADD NEW CUSTOM TRADING PAIR */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+          {/* A. EDIT PAIR CARD */}
+          <div id="admin-edit-pair-section" className="bg-slate-900 dark:bg-slate-900/95 border border-slate-800 rounded-3xl p-5 md:p-6 shadow-xl relative">
+            <div className="flex items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <Edit2 className="h-4 w-4 text-indigo-400" />
+                <h4 className="text-xs font-black uppercase tracking-wider text-slate-200">
+                  EDIT TRADING PAIR {editingPair ? `(${editingPair.pair})` : ""}
+                </h4>
+              </div>
+
+              {/* Quick Pair Selector */}
+              <select
+                value={editingPair?.symbol || editPairForm.symbol}
+                onChange={(e) => {
+                  const found = assets.find((a) => a.symbol === e.target.value);
+                  if (found) handleSelectPairForEditing(found);
+                }}
+                className="bg-slate-950 border border-slate-700 text-slate-300 rounded-xl px-2.5 py-1 text-[11px] font-semibold max-w-[180px] truncate"
+              >
+                {assets.map((a) => (
+                  <option key={a.symbol} value={a.symbol}>
+                    {a.pair}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <form onSubmit={handleSaveEditPair} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                  Pair Display Name
+                </label>
+                <input
+                  type="text"
+                  value={editPairForm.pair}
+                  onChange={(e) => setEditPairForm({ ...editPairForm, pair: e.target.value })}
+                  placeholder="e.g. GER 40 (DAX Index)"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-bold text-slate-400">
+                    TradingView Symbol
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleDetectPriceForEdit}
+                    disabled={isDetectingPriceForEdit}
+                    className="text-xs font-bold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${isDetectingPriceForEdit ? "animate-spin" : ""}`} />
+                    {isDetectingPriceForEdit ? "Detecting..." : "Detect Price"}
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={editPairForm.symbol}
+                  onChange={(e) => setEditPairForm({ ...editPairForm, symbol: e.target.value.toUpperCase() })}
+                  placeholder="e.g. CURRENCYCOM:DE40"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500 uppercase"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                    Category
+                  </label>
+                  <select
+                    value={editPairForm.category}
+                    onChange={(e) => setEditPairForm({ ...editPairForm, category: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white focus:outline-none focus:border-indigo-500"
+                  >
+                    {categories.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                    Price (₹)
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={editPairForm.price}
+                    onChange={(e) => setEditPairForm({ ...editPairForm, price: e.target.value })}
+                    placeholder="19400"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-emerald-400 placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                    Protected Payout %
+                  </label>
+                  <input
+                    type="number"
+                    value={editPairForm.protectedPayout}
+                    onChange={(e) => setEditPairForm({ ...editPairForm, protectedPayout: Number(e.target.value) })}
+                    placeholder="75"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                    Standard Payout %
+                  </label>
+                  <input
+                    type="number"
+                    value={editPairForm.standardPayout}
+                    onChange={(e) => setEditPairForm({ ...editPairForm, standardPayout: Number(e.target.value) })}
+                    placeholder="82"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  type="submit"
+                  className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white rounded-2xl text-xs md:text-sm font-black flex items-center justify-center gap-2 cursor-pointer shadow-lg transition-all"
+                >
+                  <Check className="h-4 w-4" /> Save
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLockEditPrice}
+                  className="flex-1 py-3 bg-amber-600 hover:bg-amber-500 active:bg-amber-700 text-white rounded-2xl text-xs md:text-sm font-black flex items-center justify-center gap-2 cursor-pointer shadow-lg transition-all"
+                >
+                  <Lock className="h-4 w-4" /> Lock Price
+                </button>
+              </div>
+            </form>
+          </div>
+
+          {/* B. ADD NEW CUSTOM TRADING PAIR CARD */}
+          <div className="bg-slate-900 dark:bg-slate-900/95 border border-slate-800 rounded-3xl p-5 md:p-6 shadow-xl relative">
+            <div className="flex items-center gap-2 mb-4 pb-3 border-b border-slate-800">
+              <Plus className="h-4 w-4 text-emerald-400" />
+              <h4 className="text-xs font-black uppercase tracking-wider text-slate-200">
+                ADD NEW CUSTOM TRADING PAIR
+              </h4>
+            </div>
+
+            <form onSubmit={handleAddNewPair} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                  Pair Name
+                </label>
+                <input
+                  type="text"
+                  value={newPairForm.pair}
+                  onChange={(e) => setNewPairForm({ ...newPairForm, pair: e.target.value })}
+                  placeholder="e.g. DOGE / USDT (Dogecoin)"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-bold text-slate-400">
+                    TradingView Symbol
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleDetectPriceForNew}
+                    disabled={isDetectingPriceForNew}
+                    className="text-xs font-bold text-amber-400 hover:text-amber-300 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  >
+                    <Zap className={`h-3.5 w-3.5 ${isDetectingPriceForNew ? "animate-spin" : ""}`} />
+                    {isDetectingPriceForNew ? "Detecting..." : "Detect Live Price"}
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={newPairForm.symbol}
+                  onChange={(e) => setNewPairForm({ ...newPairForm, symbol: e.target.value.toUpperCase() })}
+                  placeholder="e.g. BINANCE:DOGEUSDT"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 uppercase"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                  Category
+                </label>
+                <select
+                  value={newPairForm.category}
+                  onChange={(e) => setNewPairForm({ ...newPairForm, category: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white focus:outline-none focus:border-emerald-500"
+                >
+                  {categories.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                  Initial Base Price (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={newPairForm.basePrice}
+                  onChange={(e) => setNewPairForm({ ...newPairForm, basePrice: e.target.value })}
+                  placeholder="Auto TradingView Live Feed"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                    Protected Payout (%)
+                  </label>
+                  <input
+                    type="number"
+                    value={newPairForm.protectedPayoutPercentage}
+                    onChange={(e) => setNewPairForm({ ...newPairForm, protectedPayoutPercentage: Number(e.target.value) })}
+                    placeholder="80"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                    Standard Payout (%)
+                  </label>
+                  <input
+                    type="number"
+                    value={newPairForm.standardPayoutPercentage}
+                    onChange={(e) => setNewPairForm({ ...newPairForm, standardPayoutPercentage: Number(e.target.value) })}
+                    placeholder="85"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2">
+                <button
+                  type="submit"
+                  className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white rounded-2xl text-xs md:text-sm font-black flex items-center justify-center gap-2 cursor-pointer shadow-lg transition-all"
+                >
+                  <Plus className="h-4 w-4" /> Add Pair
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+
         {/* ACTIVE TRADING PAIRS (N) Search and Filter */}
         <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
           <div>
@@ -1128,7 +1662,15 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                      <button
+                        type="button"
+                        onClick={() => handleSelectPairForEditing(asset)}
+                        className="px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 rounded-lg text-[10px] font-bold hover:bg-indigo-100 dark:hover:bg-indigo-900/80 flex items-center gap-1 cursor-pointer"
+                        title="Edit pair settings & live price"
+                      >
+                        <Edit2 className="h-3 w-3" /> Edit
+                      </button>
                       <button
                         type="button"
                         onClick={() => {
@@ -1145,7 +1687,7 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                           setFixingPriceAsset(asset);
                           setFixedPriceValue(String(asset.basePrice));
                         }}
-                        className="px-2.5 py-1 bg-indigo-600 text-white rounded-lg text-[10px] font-bold hover:bg-indigo-700 flex items-center gap-1 cursor-pointer"
+                        className="px-2.5 py-1 bg-slate-800 text-white rounded-lg text-[10px] font-bold hover:bg-slate-700 flex items-center gap-1 cursor-pointer"
                       >
                         <Zap className="h-3 w-3" /> Fix Price
                       </button>
