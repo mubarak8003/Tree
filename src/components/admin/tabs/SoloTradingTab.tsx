@@ -6,7 +6,7 @@ import {
   Zap, Save, RefreshCw, RotateCw, Power, RotateCcw, Plus, Trash2, Edit2, 
   Search, Check, X, Shield, Clock, Sliders, DollarSign, Filter, TrendingUp, 
   TrendingDown, AlertCircle, FileText, ChevronLeft, ChevronRight, User, History, ArrowUpRight, ArrowDownRight, Layers,
-  Lock, Sparkles
+  Lock, Sparkles, Eye, EyeOff
 } from "lucide-react";
 import { 
   DEFAULT_SOLO_CATEGORIES, 
@@ -200,6 +200,24 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
       );
     } catch (err: any) {
       onTriggerNotification?.(err.message || "Failed to toggle Solo Engine", "error");
+    }
+  };
+
+  // Pattern Radar Toggle Handler (Hide / Show for Traders)
+  const handleTogglePatternRadar = async () => {
+    const isCurrentlyVisible = config.showPatternRadar !== false;
+    const nextState = !isCurrentlyVisible;
+    try {
+      await saveSoloTradingConfig({ showPatternRadar: nextState });
+      setConfig((prev) => ({ ...prev, showPatternRadar: nextState }));
+      onTriggerNotification?.(
+        nextState 
+          ? "⚡ Pattern Radar button is now VISIBLE to traders." 
+          : "⚡ Pattern Radar button is now HIDDEN from traders.",
+        nextState ? "success" : "info"
+      );
+    } catch (err: any) {
+      onTriggerNotification?.(err.message || "Failed to toggle Pattern Radar visibility", "error");
     }
   };
 
@@ -512,8 +530,8 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
 
     // 3. Forex Rates
     try {
-      const fxRes = await fetch("/api/market/forex");
-      if (fxRes.ok) {
+      const fxRes = await fetch("https://open.er-api.com/v6/latest/USD").catch(() => fetch("/api/market/forex"));
+      if (fxRes && fxRes.ok) {
         const data = await fxRes.json();
         if (data.rates) {
           const rawFx = clean.replace(/^(BINANCE:|OANDA:|FX:|TVC:|CURRENCYCOM:|CAPITALCOM:)/, "").replace(/[^A-Z0-9]/g, "");
@@ -895,7 +913,59 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
         </button>
       </div>
 
-      {/* 2. Solo Engine Rules & Payout Rates */}
+      {/* 2. Feature Visibility & Pattern Radar Toggle */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+        <div className="flex items-start gap-3.5">
+          <div className={`p-3 rounded-2xl ${
+            config.showPatternRadar !== false 
+              ? "bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400" 
+              : "bg-slate-100 dark:bg-slate-800 text-slate-400"
+          }`}>
+            <Sparkles className="h-7 w-7" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                Pattern Radar Visibility
+              </h3>
+              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold tracking-wide uppercase ${
+                config.showPatternRadar !== false 
+                  ? "bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800" 
+                  : "bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700"
+              }`}>
+                {config.showPatternRadar !== false ? "VISIBLE TO USERS" : "HIDDEN FROM USERS"}
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-1">
+              Admin controls whether the <strong>"⚡ Pattern Radar"</strong> button is shown to traders on their trading desk.
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleTogglePatternRadar}
+          className={`px-5 py-2.5 rounded-2xl text-xs font-extrabold tracking-wide uppercase transition-all shadow-md flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+            config.showPatternRadar !== false
+              ? "bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 text-white"
+              : "bg-amber-600 hover:bg-amber-700 text-white"
+          }`}
+        >
+          {config.showPatternRadar !== false ? (
+            <>
+              <EyeOff className="h-4 w-4" />
+              HIDE PATTERN RADAR
+            </>
+          ) : (
+            <>
+              <Eye className="h-4 w-4" />
+              SHOW PATTERN RADAR
+            </>
+          )}
+        </button>
+      </div>
+
+      {/* 3. Solo Engine Rules & Payout Rates */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-sm">
         <div className="flex items-center gap-3 mb-6">
           <div className="p-3 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 rounded-2xl">

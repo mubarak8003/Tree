@@ -34,7 +34,7 @@ export const UsersTab: React.FC<UsersTabProps> = ({
 
   // Balance adjustment modal state
   const [balanceUser, setBalanceUser] = useState<UserProfile | null>(null);
-  const [adjustAmount, setAdjustAmount] = useState<number>(0);
+  const [adjustAmount, setAdjustAmount] = useState<string | number>("");
   const [adjustType, setAdjustType] = useState<"BONUS" | "ADJUSTMENT">("BONUS");
   const [adjustReason, setAdjustReason] = useState("");
   const [isAdjusting, setIsAdjusting] = useState(false);
