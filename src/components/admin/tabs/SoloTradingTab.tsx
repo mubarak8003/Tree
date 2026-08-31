@@ -3,7 +3,7 @@ import {
   SoloTradingConfig, MarketAsset, SoloTrade 
 } from "../../../types";
 import { 
-  Zap, Save, RefreshCw, Power, RotateCcw, Plus, Trash2, Edit2, 
+  Zap, Save, RefreshCw, RotateCw, Power, RotateCcw, Plus, Trash2, Edit2, 
   Search, Check, X, Shield, Clock, Sliders, DollarSign, Filter, TrendingUp, 
   TrendingDown, AlertCircle, FileText, ChevronLeft, ChevronRight, User, History, ArrowUpRight, ArrowDownRight, Layers,
   Lock, Sparkles
@@ -92,6 +92,8 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
 
   // Active Pair for Editing (shown in the Edit Pair card)
   const [editingPair, setEditingPair] = useState<MarketAsset | null>(null);
+  const [inlineEditingSymbol, setInlineEditingSymbol] = useState<string | null>(null);
+  const [quickDetectingSymbol, setQuickDetectingSymbol] = useState<string | null>(null);
   const [editPairForm, setEditPairForm] = useState<{
     pair: string;
     symbol: string;
@@ -575,6 +577,7 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
 
   const handleSelectPairForEditing = (asset: MarketAsset) => {
     setEditingPair(asset);
+    setInlineEditingSymbol((prev) => (prev === asset.symbol ? null : asset.symbol));
     setEditPairForm({
       pair: asset.pair,
       symbol: asset.symbol,
@@ -584,10 +587,42 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
       protectedPayout: asset.protectedPayoutPercentage ?? protectedPayout,
       standardPayout: asset.standardPayoutPercentage ?? asset.payoutPercentage ?? standardPayout
     });
-    // Smooth scroll to edit section if available
-    const el = document.getElementById("admin-edit-pair-section");
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
+  const handleToggleInlineEdit = (asset: MarketAsset) => {
+    if (inlineEditingSymbol === asset.symbol) {
+      setInlineEditingSymbol(null);
+    } else {
+      setEditingPair(asset);
+      setInlineEditingSymbol(asset.symbol);
+      setEditPairForm({
+        pair: asset.pair,
+        symbol: asset.symbol,
+        category: asset.category,
+        price: asset.basePrice,
+        decimals: asset.decimals ?? 2,
+        protectedPayout: asset.protectedPayoutPercentage ?? protectedPayout,
+        standardPayout: asset.standardPayoutPercentage ?? asset.payoutPercentage ?? standardPayout
+      });
+    }
+  };
+
+  const handleQuickDetectPrice = async (asset: MarketAsset) => {
+    try {
+      setQuickDetectingSymbol(asset.symbol);
+      const detected = await detectLivePrice(asset.symbol);
+      if (detected !== null && detected > 0) {
+        const updated = assets.map((a) => (a.symbol === asset.symbol ? { ...a, basePrice: detected } : a));
+        await saveSoloTradingConfig({ customAssets: updated });
+        setAssets(updated);
+        onTriggerNotification?.(`Live price updated for ${asset.pair}: ₹${detected}`, "success");
+      } else {
+        onTriggerNotification?.(`Could not auto-detect live price for ${asset.symbol}. Click Edit to enter manually.`, "info");
+      }
+    } catch (err: any) {
+      onTriggerNotification?.(err.message || "Failed to detect price", "error");
+    } finally {
+      setQuickDetectingSymbol(null);
     }
   };
 
@@ -642,6 +677,7 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
     try {
       await saveSoloTradingConfig({ customAssets: updatedAssets });
       setAssets(updatedAssets);
+      setInlineEditingSymbol(null);
       onTriggerNotification?.(`Saved changes for ${editPairForm.pair}!`, "success");
     } catch (err: any) {
       onTriggerNotification?.(err.message || "Failed to save trading pair", "error");
@@ -667,6 +703,7 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
     try {
       await saveSoloTradingConfig({ customAssets: updatedAssets });
       setAssets(updatedAssets);
+      setInlineEditingSymbol(null);
       onTriggerNotification?.(`🔒 Price locked for ${editPairForm.pair} at ₹${numPrice}`, "success");
     } catch (err: any) {
       onTriggerNotification?.(err.message || "Failed to lock price", "error");
@@ -1640,6 +1677,15 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                       </button>
                       <button
                         type="button"
+                        onClick={() => handleQuickDetectPrice(asset)}
+                        disabled={quickDetectingSymbol === asset.symbol}
+                        className="p-1 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 rounded-lg cursor-pointer disabled:opacity-50"
+                        title="Quick sync / detect live market price"
+                      >
+                        <RotateCw className={`h-3.5 w-3.5 ${quickDetectingSymbol === asset.symbol ? "animate-spin text-indigo-500" : ""}`} />
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => handleDeleteAsset(asset.symbol)}
                         className="p-1 text-slate-400 hover:text-rose-600 rounded-lg cursor-pointer"
                         title="Delete pair"
@@ -1654,45 +1700,175 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                     <span className="text-amber-600 dark:text-amber-400">⚡ Std: {stdPayout}%</span>
                   </div>
 
-                  <div className="mt-3 p-2.5 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-800 flex items-center justify-between">
-                    <div>
-                      <div className="text-[9px] text-slate-400 uppercase font-semibold">LIVE MARKET PRICE</div>
-                      <div className="text-sm font-black text-emerald-600 dark:text-emerald-400">
-                        {asset.basePrice.toLocaleString(undefined, { minimumFractionDigits: asset.decimals, maximumFractionDigits: asset.decimals })}
+                  {/* INLINE EDIT FORM OR LIVE MARKET PRICE SUMMARY */}
+                  {inlineEditingSymbol === asset.symbol ? (
+                    <div className="mt-3 p-3.5 sm:p-4 bg-slate-950/95 dark:bg-slate-950 border border-slate-800 rounded-2xl space-y-3 text-left shadow-lg">
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                        <div className="flex items-center gap-1.5 text-indigo-400">
+                          <Edit2 className="h-3.5 w-3.5" />
+                          <span className="text-[11px] font-black tracking-wider uppercase">
+                            EDIT PAIR DETAILS
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setInlineEditingSymbol(null)}
+                          className="p-1 text-slate-400 hover:text-white rounded-lg cursor-pointer"
+                          title="Close inline editor"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-400 mb-1">
+                          Pair Display Name
+                        </label>
+                        <input
+                          type="text"
+                          value={editPairForm.pair}
+                          onChange={(e) => setEditPairForm({ ...editPairForm, pair: e.target.value })}
+                          className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-indigo-500"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[11px] font-bold text-slate-400">
+                            TradingView Symbol
+                          </label>
+                          <button
+                            type="button"
+                            onClick={handleDetectPriceForEdit}
+                            disabled={isDetectingPriceForEdit}
+                            className="text-[10px] font-bold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                          >
+                            <RefreshCw className={`h-3 w-3 ${isDetectingPriceForEdit ? "animate-spin" : ""}`} />
+                            {isDetectingPriceForEdit ? "Detecting..." : "Detect Price"}
+                          </button>
+                        </div>
+                        <input
+                          type="text"
+                          value={editPairForm.symbol}
+                          onChange={(e) => setEditPairForm({ ...editPairForm, symbol: e.target.value.toUpperCase() })}
+                          className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-3 py-2 text-xs font-bold text-white uppercase focus:outline-none focus:border-indigo-500"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2.5">
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-400 mb-1">
+                            Category
+                          </label>
+                          <select
+                            value={editPairForm.category}
+                            onChange={(e) => setEditPairForm({ ...editPairForm, category: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-2.5 py-2 text-xs font-bold text-white focus:outline-none focus:border-indigo-500"
+                          >
+                            {categories.map((c) => (
+                              <option key={c} value={c}>{c}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-400 mb-1">
+                            Price (₹)
+                          </label>
+                          <input
+                            type="number"
+                            step="any"
+                            value={editPairForm.price}
+                            onChange={(e) => setEditPairForm({ ...editPairForm, price: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-2.5 py-2 text-xs font-bold text-emerald-400 focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2.5">
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-400 mb-1">
+                            Protected Payout %
+                          </label>
+                          <input
+                            type="number"
+                            value={editPairForm.protectedPayout}
+                            onChange={(e) => setEditPairForm({ ...editPairForm, protectedPayout: Number(e.target.value) })}
+                            className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-2.5 py-2 text-xs font-bold text-white focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-400 mb-1">
+                            Standard Payout %
+                          </label>
+                          <input
+                            type="number"
+                            value={editPairForm.standardPayout}
+                            onChange={(e) => setEditPairForm({ ...editPairForm, standardPayout: Number(e.target.value) })}
+                            className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-2.5 py-2 text-xs font-bold text-white focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={handleSaveEditPair}
+                          className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-md transition-all"
+                        >
+                          <Check className="h-3.5 w-3.5" /> Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleLockEditPrice}
+                          className="w-full py-2.5 bg-amber-600 hover:bg-amber-500 active:bg-amber-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-md transition-all"
+                        >
+                          <Lock className="h-3.5 w-3.5" /> Lock Price
+                        </button>
                       </div>
                     </div>
+                  ) : (
+                    <div className="mt-3 p-2.5 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                      <div>
+                        <div className="text-[9px] text-slate-400 uppercase font-semibold">LIVE MARKET PRICE</div>
+                        <div className="text-sm font-black text-emerald-600 dark:text-emerald-400">
+                          {asset.basePrice.toLocaleString(undefined, { minimumFractionDigits: asset.decimals, maximumFractionDigits: asset.decimals })}
+                        </div>
+                      </div>
 
-                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                      <button
-                        type="button"
-                        onClick={() => handleSelectPairForEditing(asset)}
-                        className="px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 rounded-lg text-[10px] font-bold hover:bg-indigo-100 dark:hover:bg-indigo-900/80 flex items-center gap-1 cursor-pointer"
-                        title="Edit pair settings & live price"
-                      >
-                        <Edit2 className="h-3 w-3" /> Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingExpiriesAsset(asset);
-                          setCustomPairDurations((asset.allowedDurations || []).join(", "));
-                        }}
-                        className="px-2.5 py-1 bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 rounded-lg text-[10px] font-bold hover:bg-amber-100 flex items-center gap-1 cursor-pointer"
-                      >
-                        <Clock className="h-3 w-3" /> Expiries
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setFixingPriceAsset(asset);
-                          setFixedPriceValue(String(asset.basePrice));
-                        }}
-                        className="px-2.5 py-1 bg-slate-800 text-white rounded-lg text-[10px] font-bold hover:bg-slate-700 flex items-center gap-1 cursor-pointer"
-                      >
-                        <Zap className="h-3 w-3" /> Fix Price
-                      </button>
+                      <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleInlineEdit(asset)}
+                          className="px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 rounded-lg text-[10px] font-bold hover:bg-indigo-100 dark:hover:bg-indigo-900/80 flex items-center gap-1 cursor-pointer"
+                          title="Edit pair settings & live price right here"
+                        >
+                          <Edit2 className="h-3 w-3" /> Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingExpiriesAsset(asset);
+                            setCustomPairDurations((asset.allowedDurations || []).join(", "));
+                          }}
+                          className="px-2.5 py-1 bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 rounded-lg text-[10px] font-bold hover:bg-amber-100 flex items-center gap-1 cursor-pointer"
+                        >
+                          <Clock className="h-3 w-3" /> Expiries
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFixingPriceAsset(asset);
+                            setFixedPriceValue(String(asset.basePrice));
+                          }}
+                          className="px-2.5 py-1 bg-slate-800 text-white rounded-lg text-[10px] font-bold hover:bg-slate-700 flex items-center gap-1 cursor-pointer"
+                        >
+                          <Zap className="h-3 w-3" /> Fix Price
+                        </button>
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
               </div>
             );
