@@ -24,7 +24,7 @@ import {
   Eye,
   EyeOff
 } from "lucide-react";
-import { createSupportMessage, findUserByEmailInFirestore, loginAdminWithPassword, normalizePhoneDigits, subscribeBrandingSettings, DEFAULT_BRANDING_SETTINGS, BrandingSettings } from "../firebaseService";
+import { createSupportMessage, findUserByEmailInFirestore, loginAdminWithPassword, loginTraderWithPin, normalizePhoneDigits, subscribeBrandingSettings, DEFAULT_BRANDING_SETTINGS, BrandingSettings } from "../firebaseService";
 import { loginAdminAccount } from "../services/adminRbacService";
 
 interface LoginPortalProps {
@@ -111,26 +111,19 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
     setRegisterError("");
 
     try {
-      // 1. Send Email + PIN to backend API for bcrypt hash verification & rate limiting
-      const response = await fetch("/api/user/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: cleanEmail, pin: cleanPin }),
-      });
+      // Authenticate via loginTraderWithPin (tries API first, seamlessly falls back to direct client Firestore verification on static hosting like Vercel)
+      const res = await loginTraderWithPin(cleanEmail, cleanPin);
 
-      const data = await response.json();
-
-      if (data.success && data.user) {
+      if (res.success && res.user) {
         setRegisterError("");
         setLoginPin("");
-        onLogin("user", data.user.id);
+        onLogin("user", res.user.id);
       } else {
-        setRegisterError(data.message || "Invalid Email or PIN.");
+        setRegisterError(res.message || "Invalid Email or PIN.");
       }
     } catch (err: any) {
       console.error("Trader PIN login error:", err);
-      // Fallback network check
-      setRegisterError("Failed to connect to authentication server. Please check your network connection.");
+      setRegisterError(err.message || "Failed to log in. Please check your credentials or contact Admin.");
     } finally {
       setIsLoggingInUser(false);
     }
