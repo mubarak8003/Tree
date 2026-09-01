@@ -630,22 +630,12 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
           }
 
           if (formatted.length > 0) {
+            const activeLive = livePriceService.getPrice(currentSymbol);
             const now = Date.now();
             const intervalMs = timeframeSec * 1000;
             const currentCandlePeriod = Math.floor(now / intervalMs) * intervalMs;
 
             const lastCandle = formatted[formatted.length - 1];
-            let activeLive = livePriceService.getPrice(currentSymbol);
-
-            // If activeLive is not set or diverges by > 2% from genuine Deriv candle close, adopt genuine candle close
-            if (!activeLive || activeLive <= 0 || (lastCandle && lastCandle.close > 0 && Math.abs(activeLive - lastCandle.close) / lastCandle.close > 0.02)) {
-              if (lastCandle && lastCandle.close > 0) {
-                activeLive = lastCandle.close;
-                livePriceService.setPrice(currentSymbol, activeLive, false, "Deriv Unified Feed", 15);
-                livePriceService.setRawExternalPrice(currentSymbol, activeLive);
-              }
-            }
-
             if (lastCandle) {
               if (lastCandle.time >= currentCandlePeriod) {
                 // The last candle is already the active forming candle directly from exchange
