@@ -30,12 +30,12 @@ export const SettlementTab: React.FC<SettlementTabProps> = ({
   const [selectedPairObj, setSelectedPairObj] = useState(POPULAR_TRADING_PAIRS[0]);
   const [customPair, setCustomPair] = useState("");
   const [isCustom, setIsCustom] = useState(false);
-  const [targetAmount, setTargetAmount] = useState(5000);
-  const [minContribution, setMinContribution] = useState(50);
-  const [maxParticipants, setMaxParticipants] = useState(50);
-  const [expectedReturn, setExpectedReturn] = useState(15);
-  const [freeRewardAmount, setFreeRewardAmount] = useState(10);
-  const [durationSeconds, setDurationSeconds] = useState(86400); // 24 hours
+  const [targetAmount, setTargetAmount] = useState<number | string>(5000);
+  const [minContribution, setMinContribution] = useState<number | string>(50);
+  const [maxParticipants, setMaxParticipants] = useState<number | string>(50);
+  const [expectedReturn, setExpectedReturn] = useState<number | string>(15);
+  const [freeRewardAmount, setFreeRewardAmount] = useState<number | string>(10);
+  const [durationSeconds, setDurationSeconds] = useState<number | string>(86400); // 24 hours
   const [tradeType, setTradeType] = useState<TradeType>("CALL");
   const [riskLevel, setRiskLevel] = useState<RiskLevel>("MEDIUM");
   const [isCreatingPool, setIsCreatingPool] = useState(false);
@@ -490,9 +490,10 @@ export const SettlementTab: React.FC<SettlementTabProps> = ({
               <input
                 type="number"
                 value={freeRewardAmount}
-                onChange={(e) => setFreeRewardAmount(Number(e.target.value))}
+                onChange={(e) => setFreeRewardAmount(e.target.value === "" ? "" : Number(e.target.value))}
                 min="1"
                 max="10000"
+                placeholder="10"
                 className="w-full bg-emerald-50/40 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-800 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-900 dark:text-slate-100"
                 required
               />
@@ -515,8 +516,9 @@ export const SettlementTab: React.FC<SettlementTabProps> = ({
               <input
                 type="number"
                 value={targetAmount}
-                onChange={(e) => setTargetAmount(Number(e.target.value))}
+                onChange={(e) => setTargetAmount(e.target.value === "" ? "" : Number(e.target.value))}
                 min="50"
+                placeholder="5000"
                 className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
                 required
               />
@@ -530,8 +532,9 @@ export const SettlementTab: React.FC<SettlementTabProps> = ({
               <input
                 type="number"
                 value={minContribution}
-                onChange={(e) => setMinContribution(Number(e.target.value))}
+                onChange={(e) => setMinContribution(e.target.value === "" ? "" : Number(e.target.value))}
                 min="1"
+                placeholder="50"
                 className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
                 required
               />
@@ -546,9 +549,10 @@ export const SettlementTab: React.FC<SettlementTabProps> = ({
             <input
               type="number"
               value={expectedReturn}
-              onChange={(e) => setExpectedReturn(Number(e.target.value))}
+              onChange={(e) => setExpectedReturn(e.target.value === "" ? "" : Number(e.target.value))}
               min="1"
               max="500"
+              placeholder="15"
               className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
               required
             />
@@ -560,9 +564,10 @@ export const SettlementTab: React.FC<SettlementTabProps> = ({
             <input
               type="number"
               value={maxParticipants}
-              onChange={(e) => setMaxParticipants(Number(e.target.value))}
+              onChange={(e) => setMaxParticipants(e.target.value === "" ? "" : Number(e.target.value))}
               min="2"
               max="1000"
+              placeholder="50"
               className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
               required
             />
@@ -574,8 +579,9 @@ export const SettlementTab: React.FC<SettlementTabProps> = ({
             <input
               type="number"
               value={durationSeconds}
-              onChange={(e) => setDurationSeconds(Number(e.target.value))}
+              onChange={(e) => setDurationSeconds(e.target.value === "" ? "" : Number(e.target.value))}
               min="60"
+              placeholder="86400"
               className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
               required
             />

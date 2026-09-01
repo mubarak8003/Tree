@@ -40,10 +40,10 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
   const [isSavingRules, setIsSavingRules] = useState(false);
 
   // Form State for Solo Rules
-  const [protectedPayout, setProtectedPayout] = useState(config.protectedPayoutPercentage ?? 75);
-  const [standardPayout, setStandardPayout] = useState(config.standardPayoutPercentage ?? 82);
-  const [minStake, setMinStake] = useState(config.minStake ?? 5);
-  const [maxStake, setMaxStake] = useState(config.maxStake ?? 20);
+  const [protectedPayout, setProtectedPayout] = useState<number | string>(config.protectedPayoutPercentage ?? 75);
+  const [standardPayout, setStandardPayout] = useState<number | string>(config.standardPayoutPercentage ?? 82);
+  const [minStake, setMinStake] = useState<number | string>(config.minStake ?? 5);
+  const [maxStake, setMaxStake] = useState<number | string>(config.maxStake ?? 20);
   const [drawRule, setDrawRule] = useState<"REFUND" | "LOSS">(config.drawRule ?? "LOSS");
 
   // Durations State
@@ -128,8 +128,8 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
           category: defaultAsset.category,
           price: defaultAsset.basePrice,
           decimals: defaultAsset.decimals ?? 2,
-          protectedPayout: defaultAsset.protectedPayoutPercentage ?? protectedPayout,
-          standardPayout: defaultAsset.standardPayoutPercentage ?? defaultAsset.payoutPercentage ?? standardPayout
+          protectedPayout: defaultAsset.protectedPayoutPercentage ?? Number(protectedPayout),
+          standardPayout: defaultAsset.standardPayoutPercentage ?? defaultAsset.payoutPercentage ?? Number(standardPayout)
         });
       }
     }
@@ -224,18 +224,27 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
   // Save Rules
   const handleSaveRules = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (minStake <= 0 || maxStake < minStake) {
+    const numMinStake = Number(minStake);
+    const numMaxStake = Number(maxStake);
+    const numProtected = Number(protectedPayout);
+    const numStandard = Number(standardPayout);
+
+    if (isNaN(numMinStake) || numMinStake <= 0) {
+      onTriggerNotification?.("Please enter a valid Min trade stake.", "error");
+      return;
+    }
+    if (isNaN(numMaxStake) || numMaxStake < numMinStake) {
       onTriggerNotification?.("Max stake must be greater than or equal to Min stake.", "error");
       return;
     }
     try {
       setIsSavingRules(true);
       await saveSoloTradingConfig({
-        protectedPayoutPercentage: Number(protectedPayout),
-        standardPayoutPercentage: Number(standardPayout),
-        defaultPayoutPercentage: Number(standardPayout),
-        minStake: Number(minStake),
-        maxStake: Number(maxStake),
+        protectedPayoutPercentage: isNaN(numProtected) ? 75 : numProtected,
+        standardPayoutPercentage: isNaN(numStandard) ? 82 : numStandard,
+        defaultPayoutPercentage: isNaN(numStandard) ? 82 : numStandard,
+        minStake: numMinStake,
+        maxStake: numMaxStake,
         drawRule: drawRule
       });
       onTriggerNotification?.("Solo Engine Rules & Payout Rates saved successfully!", "success");
@@ -602,8 +611,8 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
       category: asset.category,
       price: asset.basePrice,
       decimals: asset.decimals ?? 2,
-      protectedPayout: asset.protectedPayoutPercentage ?? protectedPayout,
-      standardPayout: asset.standardPayoutPercentage ?? asset.payoutPercentage ?? standardPayout
+      protectedPayout: asset.protectedPayoutPercentage ?? Number(protectedPayout),
+      standardPayout: asset.standardPayoutPercentage ?? asset.payoutPercentage ?? Number(standardPayout)
     });
   };
 
@@ -619,8 +628,8 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
         category: asset.category,
         price: asset.basePrice,
         decimals: asset.decimals ?? 2,
-        protectedPayout: asset.protectedPayoutPercentage ?? protectedPayout,
-        standardPayout: asset.standardPayoutPercentage ?? asset.payoutPercentage ?? standardPayout
+        protectedPayout: asset.protectedPayoutPercentage ?? Number(protectedPayout),
+        standardPayout: asset.standardPayoutPercentage ?? asset.payoutPercentage ?? Number(standardPayout)
       });
     }
   };
@@ -988,9 +997,10 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                 <input
                   type="number"
                   value={protectedPayout}
-                  onChange={(e) => setProtectedPayout(Number(e.target.value))}
+                  onChange={(e) => setProtectedPayout(e.target.value === "" ? "" : Number(e.target.value))}
                   min="1"
                   max="100"
+                  placeholder="75"
                   className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100 font-bold"
                   required
                 />
@@ -1010,9 +1020,10 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                 <input
                   type="number"
                   value={standardPayout}
-                  onChange={(e) => setStandardPayout(Number(e.target.value))}
+                  onChange={(e) => setStandardPayout(e.target.value === "" ? "" : Number(e.target.value))}
                   min="1"
                   max="100"
+                  placeholder="82"
                   className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100 font-bold"
                   required
                 />
@@ -1032,8 +1043,9 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
               <input
                 type="number"
                 value={minStake}
-                onChange={(e) => setMinStake(Number(e.target.value))}
+                onChange={(e) => setMinStake(e.target.value === "" ? "" : Number(e.target.value))}
                 min="1"
+                placeholder="5"
                 className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100 font-bold"
                 required
               />
@@ -1046,8 +1058,9 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
               <input
                 type="number"
                 value={maxStake}
-                onChange={(e) => setMaxStake(Number(e.target.value))}
+                onChange={(e) => setMaxStake(e.target.value === "" ? "" : Number(e.target.value))}
                 min="1"
+                placeholder="20"
                 className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100 font-bold"
                 required
               />

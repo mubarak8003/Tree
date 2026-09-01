@@ -630,12 +630,22 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
           }
 
           if (formatted.length > 0) {
-            const activeLive = livePriceService.getPrice(currentSymbol);
             const now = Date.now();
             const intervalMs = timeframeSec * 1000;
             const currentCandlePeriod = Math.floor(now / intervalMs) * intervalMs;
 
             const lastCandle = formatted[formatted.length - 1];
+            let activeLive = livePriceService.getPrice(currentSymbol);
+
+            // If activeLive is not set or diverges by > 2% from genuine Deriv candle close, adopt genuine candle close
+            if (!activeLive || activeLive <= 0 || (lastCandle && lastCandle.close > 0 && Math.abs(activeLive - lastCandle.close) / lastCandle.close > 0.02)) {
+              if (lastCandle && lastCandle.close > 0) {
+                activeLive = lastCandle.close;
+                livePriceService.setPrice(currentSymbol, activeLive, false, "Deriv Unified Feed", 15);
+                livePriceService.setRawExternalPrice(currentSymbol, activeLive);
+              }
+            }
+
             if (lastCandle) {
               if (lastCandle.time >= currentCandlePeriod) {
                 // The last candle is already the active forming candle directly from exchange
@@ -817,12 +827,12 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       const chartWidth = width - paddingRight;
       const chartHeight = height - paddingBottom;
 
-      // Smooth 60 FPS Micro-Lerp for fluid live candle animation (Quotex-grade fluidity)
+      // Dynamic responsive lerp: instantaneous snappy tracking for fast market ticks (Quotex-grade fluidity)
       const currentTarget = targetPriceRef.current || livePrice;
-      if (!isFinite(renderPriceRef.current) || renderPriceRef.current <= 0 || (currentTarget > 0 && Math.abs(renderPriceRef.current - currentTarget) / currentTarget > 0.05)) {
+      if (!isFinite(renderPriceRef.current) || renderPriceRef.current <= 0 || (currentTarget > 0 && Math.abs(renderPriceRef.current - currentTarget) / currentTarget > 0.03)) {
         renderPriceRef.current = currentTarget;
       } else {
-        renderPriceRef.current += (currentTarget - renderPriceRef.current) * 0.22;
+        renderPriceRef.current += (currentTarget - renderPriceRef.current) * 0.45;
       }
       const activeDrawPrice = renderPriceRef.current;
 

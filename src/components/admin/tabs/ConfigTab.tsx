@@ -42,11 +42,11 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
   adminEmail
 }) => {
   // Config form state
-  const [targetAmount, setTargetAmount] = useState(config.targetAmount || 5000);
-  const [minContribution, setMinContribution] = useState(config.minContribution || 50);
-  const [maxParticipants, setMaxParticipants] = useState(config.maxParticipants || 50);
-  const [timeoutSeconds, setTimeoutSeconds] = useState(config.timeoutSeconds || 86400);
-  const [expectedReturn, setExpectedReturn] = useState(config.expectedReturn || 15);
+  const [targetAmount, setTargetAmount] = useState<number | string>(config.targetAmount || 5000);
+  const [minContribution, setMinContribution] = useState<number | string>(config.minContribution || 50);
+  const [maxParticipants, setMaxParticipants] = useState<number | string>(config.maxParticipants || 50);
+  const [timeoutSeconds, setTimeoutSeconds] = useState<number | string>(config.timeoutSeconds || 86400);
+  const [expectedReturn, setExpectedReturn] = useState<number | string>(config.expectedReturn || 15);
 
   // Processing times
   const [depTime, setDepTime] = useState(depositProcessingTime);
@@ -115,11 +115,11 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
     e.preventDefault();
     const updated: AdminConfig = {
       ...config,
-      targetAmount: Number(targetAmount),
-      minContribution: Number(minContribution),
-      maxParticipants: Number(maxParticipants),
-      timeoutSeconds: Number(timeoutSeconds),
-      expectedReturn: Number(expectedReturn)
+      targetAmount: Number(targetAmount) || 5000,
+      minContribution: Number(minContribution) || 50,
+      maxParticipants: Number(maxParticipants) || 50,
+      timeoutSeconds: Number(timeoutSeconds) || 86400,
+      expectedReturn: Number(expectedReturn) || 15
     };
     onConfigChange(updated);
     onTriggerNotification?.("System default configuration saved!", "success");
@@ -883,7 +883,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
             <input
               type="number"
               value={targetAmount}
-              onChange={(e) => setTargetAmount(Number(e.target.value))}
+              onChange={(e) => setTargetAmount(e.target.value === "" ? "" : Number(e.target.value))}
               className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
               required
             />
@@ -894,7 +894,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
             <input
               type="number"
               value={minContribution}
-              onChange={(e) => setMinContribution(Number(e.target.value))}
+              onChange={(e) => setMinContribution(e.target.value === "" ? "" : Number(e.target.value))}
               className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
               required
             />
@@ -905,7 +905,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
             <input
               type="number"
               value={maxParticipants}
-              onChange={(e) => setMaxParticipants(Number(e.target.value))}
+              onChange={(e) => setMaxParticipants(e.target.value === "" ? "" : Number(e.target.value))}
               className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
               required
             />
@@ -916,7 +916,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
             <input
               type="number"
               value={timeoutSeconds}
-              onChange={(e) => setTimeoutSeconds(Number(e.target.value))}
+              onChange={(e) => setTimeoutSeconds(e.target.value === "" ? "" : Number(e.target.value))}
               className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
               required
             />
@@ -927,7 +927,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
             <input
               type="number"
               value={expectedReturn}
-              onChange={(e) => setExpectedReturn(Number(e.target.value))}
+              onChange={(e) => setExpectedReturn(e.target.value === "" ? "" : Number(e.target.value))}
               className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
               required
             />

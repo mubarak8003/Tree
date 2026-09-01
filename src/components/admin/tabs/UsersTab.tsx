@@ -34,7 +34,7 @@ export const UsersTab: React.FC<UsersTabProps> = ({
 
   // Balance adjustment modal state
   const [balanceUser, setBalanceUser] = useState<UserProfile | null>(null);
-  const [adjustAmount, setAdjustAmount] = useState<string | number>("");
+  const [adjustAmount, setAdjustAmount] = useState<string>("");
   const [adjustType, setAdjustType] = useState<"BONUS" | "ADJUSTMENT">("BONUS");
   const [adjustReason, setAdjustReason] = useState("");
   const [isAdjusting, setIsAdjusting] = useState(false);
@@ -344,13 +344,17 @@ export const UsersTab: React.FC<UsersTabProps> = ({
 
   const handleAdjustBalance = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!balanceUser || adjustAmount <= 0) return;
+    const numAmount = Number(adjustAmount);
+    if (!balanceUser || isNaN(numAmount) || numAmount <= 0) {
+      onTriggerNotification?.("Please enter a valid amount greater than 0", "error");
+      return;
+    }
     try {
       setIsAdjusting(true);
-      await adjustUserBalance(balanceUser.id, adjustAmount, adjustType, adjustReason || "Admin balance adjustment");
-      onTriggerNotification?.(`Successfully adjusted balance by ₹${adjustAmount} (${adjustType})`, "success");
+      await adjustUserBalance(balanceUser.id, numAmount, adjustType, adjustReason || "Admin balance adjustment");
+      onTriggerNotification?.(`Successfully adjusted balance by ₹${numAmount} (${adjustType})`, "success");
       setBalanceUser(null);
-      setAdjustAmount(0);
+      setAdjustAmount("");
       setAdjustReason("");
     } catch (err: any) {
       onTriggerNotification?.(err.message || "Failed to adjust balance", "error");
@@ -727,7 +731,7 @@ export const UsersTab: React.FC<UsersTabProps> = ({
                           type="button"
                           onClick={() => {
                             setBalanceUser(u);
-                            setAdjustAmount(0);
+                            setAdjustAmount("");
                           }}
                           className="px-2.5 py-1 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 rounded-lg text-[11px] font-bold cursor-pointer inline-flex items-center gap-1 transition-all shadow-2xs"
                           title="Adjust Balance"
@@ -1050,8 +1054,9 @@ export const UsersTab: React.FC<UsersTabProps> = ({
                   type="number"
                   step="0.01"
                   min="0.01"
+                  placeholder="Enter amount (₹)"
                   value={adjustAmount}
-                  onChange={(e) => setAdjustAmount(Number(e.target.value))}
+                  onChange={(e) => setAdjustAmount(e.target.value)}
                   className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100 font-bold"
                   required
                 />
@@ -1078,7 +1083,7 @@ export const UsersTab: React.FC<UsersTabProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={isAdjusting || adjustAmount <= 0}
+                  disabled={isAdjusting || !adjustAmount || isNaN(Number(adjustAmount)) || Number(adjustAmount) <= 0}
                   className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition-all cursor-pointer shadow-md disabled:opacity-50"
                 >
                   {isAdjusting ? "Processing..." : "Confirm Adjustment"}
