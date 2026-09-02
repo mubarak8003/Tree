@@ -263,10 +263,14 @@ export default function App() {
   }, []);
 
   const [isAppOnline, setIsAppOnline] = useState<boolean>(() => 
-    typeof navigator !== "undefined" ? navigator.onLine : true
+    livePriceService.isOnline()
   );
 
   useEffect(() => {
+    const unsub = livePriceService.subscribeNetworkStatus((online) => {
+      setIsAppOnline(online);
+    });
+
     const handleOnline = () => {
       setIsAppOnline(true);
       triggerNotification("🟢 Internet Reconnected: App functions and live data synced.", "success");
@@ -279,6 +283,7 @@ export default function App() {
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
     return () => {
+      unsub();
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };

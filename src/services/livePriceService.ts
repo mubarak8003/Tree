@@ -526,6 +526,7 @@ export interface LivePatternState {
 type PriceListener = (prices: Record<string, number>) => void;
 type TelemetryListener = (telemetry: MarketTelemetryData) => void;
 type PatternStatusListener = (patterns: Record<string, LivePatternState>) => void;
+export type NetworkStatusListener = (isOnline: boolean) => void;
 
 class LivePriceManager {
   private prices: Record<string, number> = {};
@@ -535,6 +536,11 @@ class LivePriceManager {
   private activeAssets: MarketAsset[] = [...SUPPORTED_SOLO_ASSETS];
   private listeners: Set<PriceListener> = new Set();
   private telemetryListeners: Set<TelemetryListener> = new Set();
+  private networkStatusListeners: Set<NetworkStatusListener> = new Set();
+  private isNetworkLive: boolean = typeof navigator !== "undefined" ? navigator.onLine : true;
+  private lastRealInboundTickTime: number = Date.now();
+  private lastRealInboundBySymbol: Record<string, number> = {};
+  private healthProbeIntervalId: any = null;
   private ws: WebSocket | null = null;
   private isWsConnected = false;
   private binancePingInterval: any = null;
@@ -701,6 +707,8 @@ class LivePriceManager {
     p.latencyMs = cleanLat;
     p.avgLatencyMs = p.avgLatencyMs === 0 ? cleanLat : Math.round(p.avgLatencyMs * 0.75 + cleanLat * 0.25);
     p.lastSuccessTimestamp = Date.now();
+    this.lastRealInboundTickTime = Date.now();
+    this.setNetworkStatus(true);
     p.lastError = null;
     if (reqTime) p.lastRequestTime = reqTime;
     if (respTime) p.lastResponseTime = respTime;
@@ -724,6 +732,48 @@ class LivePriceManager {
       p.status = this.isDerivWsConnected ? "Reconnecting" : "Disconnected";
     } else {
       p.status = "Error";
+    }
+  }
+
+  public isOnline(): boolean {
+    return this.isNetworkLive;
+  }
+
+  public isFeedActive(symbol?: string): boolean {
+    if (!this.isNetworkLive) return false;
+    if (typeof navigator !== "undefined" && !navigator.onLine) return false;
+    const now = Date.now();
+    if (now - this.lastRealInboundTickTime > 2500) return false;
+    if (symbol) {
+      const raw = symbol.toUpperCase().trim().replace(/[^A-Z0-9]/g, "");
+      const last = this.lastRealInboundBySymbol[raw] || this.lastRealInboundBySymbol[symbol];
+      if (last && now - last > 3500) return false;
+    }
+    return true;
+  }
+
+  public subscribeNetworkStatus(listener: NetworkStatusListener): () => void {
+    this.networkStatusListeners.add(listener);
+    listener(this.isNetworkLive);
+    return () => {
+      this.networkStatusListeners.delete(listener);
+    };
+  }
+
+  public setNetworkStatus(online: boolean) {
+    if (this.isNetworkLive !== online) {
+      this.isNetworkLive = online;
+      if (!online) {
+        this.isWsConnected = false;
+        this.isDerivWsConnected = false;
+      }
+      this.networkStatusListeners.forEach((l) => {
+        try {
+          l(online);
+        } catch (e) {
+          console.error("Network listener error:", e);
+        }
+      });
     }
   }
 
@@ -775,10 +825,14 @@ class LivePriceManager {
 
   public setRawExternalPrice(symbol: string, price: number) {
     if (isNaN(price) || price <= 0) return;
+    const now = Date.now();
+    this.lastRealInboundTickTime = now;
+    this.setNetworkStatus(true);
     const variants = getSymbolVariants(symbol);
     variants.forEach((v) => {
       this.rawExternalPrices[v] = price;
       this.anchorPrices[v] = price;
+      this.lastRealInboundBySymbol[v] = now;
     });
   }
 
@@ -895,9 +949,13 @@ class LivePriceManager {
       providerName !== "Live Interbank Stream" &&
       providerName !== "Live Micro Ticker"
     ) {
+      this.lastRealInboundTickTime = now;
+      this.lastRealInboundBySymbol[symbol] = now;
+      this.setNetworkStatus(true);
       const variants = getSymbolVariants(symbol);
       variants.forEach(v => {
         this.anchorPrices[v] = price;
+        this.lastRealInboundBySymbol[v] = now;
       });
       this.anchorPrices[asset.symbol] = price;
       this.anchorPrices[asset.pair] = price;
@@ -1454,10 +1512,15 @@ class LivePriceManager {
       clearInterval(this.restSyncIntervalId);
       this.restSyncIntervalId = null;
     }
+    if (this.healthProbeIntervalId) {
+      clearInterval(this.healthProbeIntervalId);
+      this.healthProbeIntervalId = null;
+    }
 
     // Set up real browser network status listeners
     if (typeof window !== "undefined") {
       window.addEventListener("online", () => {
+        this.setNetworkStatus(true);
         this.providerStats.binance_ws.status = "Connecting";
         this.providerStats.deriv_ws.status = "Syncing";
         this.startBinanceWebSocket();
@@ -1467,6 +1530,7 @@ class LivePriceManager {
       });
 
       window.addEventListener("offline", () => {
+        this.setNetworkStatus(false);
         this.isWsConnected = false;
         this.isDerivWsConnected = false;
         this.providerStats.binance_ws.status = "Disconnected";
@@ -1480,80 +1544,39 @@ class LivePriceManager {
       });
     }
 
-    // Continuous Sub-Second Micro-Tick Generator (180ms pulse - 5.5 ticks/sec)
-    // Generates realistic Brownian pipette micro-movements anchored strictly to true Deriv & Binance market feeds
-    this.microTickerId = setInterval(() => {
-      if (typeof navigator !== "undefined" && !navigator.onLine) {
-        return;
-      }
-
-      let hasUpdates = false;
+    // Rapid Network Watchdog / Health Probe (Detects internet disconnect in < 2 seconds)
+    this.healthProbeIntervalId = setInterval(() => {
       const now = Date.now();
+      const idleMs = now - this.lastRealInboundTickTime;
 
-      this.activeAssets.forEach((asset) => {
-        const raw = asset.symbol.toUpperCase().replace(/[^A-Z0-9]/g, "");
-        const cleanPair = asset.pair.replace(/\s*\([^)]*\)/, "").replace(/[^A-Z0-9]/g, "");
-
-        // If manual override or live pattern is running for this symbol, let pattern control it
-        if (this.manualOverrides[raw] || this.activeLivePatterns.has(raw) || this.activeLivePatterns.has(cleanPair)) {
+      // If no inbound ticks received from Binance/Deriv for > 1500ms, probe network immediately
+      if (idleMs > 1500) {
+        if (typeof navigator !== "undefined" && !navigator.onLine) {
+          this.setNetworkStatus(false);
           return;
         }
 
-        // Get authentic market baseline anchor (from Deriv WS, Binance WS, or REST)
-        const anchor =
-          this.rawExternalPrices[asset.symbol] ||
-          this.rawExternalPrices[asset.pair] ||
-          this.rawExternalPrices[raw] ||
-          this.anchorPrices[asset.symbol] ||
-          this.prices[asset.symbol] ||
-          asset.basePrice;
-
-        if (!anchor || anchor <= 0) return;
-
-        const currentPrice = this.prices[asset.symbol] || anchor;
-        const decimals = asset.decimals || 5;
-        const factor = Math.pow(10, decimals);
-
-        // Calculate pipette micro-step based on asset class
-        let pipetteUnit = 1 / factor;
-        if (asset.category === "Forex") {
-          // Standard forex: micro pipette variance
-          pipetteUnit = decimals >= 5 ? 0.00002 : decimals === 3 ? 0.002 : 0.0001;
-        } else if (asset.category === "Metals") {
-          pipetteUnit = decimals >= 3 ? 0.02 : 0.005;
-        } else if (asset.category === "Crypto") {
-          pipetteUnit = anchor * 0.00008;
-        } else {
-          pipetteUnit = anchor * 0.00005;
-        }
-
-        // Mean-reversion drift towards true authentic market anchor (keeps price tightly bound within +-0.025% of real Deriv rate)
-        const driftTowardsAnchor = (anchor - currentPrice) * 0.14;
-        // Random micro Brownian tick
-        const randomMicro = (Math.random() - 0.495) * pipetteUnit * 1.6;
-
-        let nextPrice = currentPrice + driftTowardsAnchor + randomMicro;
-        // Strict boundary: Never diverge more than 0.035% from the authentic Deriv/Binance market anchor
-        const maxDivergence = anchor * 0.00035;
-        if (nextPrice > anchor + maxDivergence) nextPrice = anchor + maxDivergence;
-        if (nextPrice < anchor - maxDivergence) nextPrice = anchor - maxDivergence;
-
-        nextPrice = Math.round(nextPrice * factor) / factor;
-
-        if (nextPrice > 0 && nextPrice !== currentPrice) {
-          const reqTime = new Date(now - 10).toISOString();
-          const respTime = new Date(now).toISOString();
-
-          this.setPrice(asset.symbol, nextPrice, false, "Live Micro Ticker", 10, reqTime, respTime);
-          this.setPrice(asset.pair, nextPrice, false, "Live Micro Ticker", 10, reqTime, respTime);
-          hasUpdates = true;
-        }
-      });
-
-      if (hasUpdates) {
-        this.notifyListeners();
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 800);
+        fetch("/api/health", { method: "HEAD", signal: controller.signal, cache: "no-store" })
+          .then((res) => {
+            clearTimeout(timeoutId);
+            if (!res.ok) {
+              this.setNetworkStatus(false);
+            }
+          })
+          .catch(() => {
+            clearTimeout(timeoutId);
+            // Instant network disconnect detected!
+            this.setNetworkStatus(false);
+          });
       }
-    }, 180);
+    }, 1000);
+
+    // NOTE: Synthetic Micro-Ticker is permanently disabled to ensure 100% authentic market data.
+    // Real ticks from Binance WebSocket & Deriv WebSocket stream directly with 0 synthetic pollution.
+    // Visual fluid motion is handled purely by the canvas 60 FPS interpolation renderer.
+    this.microTickerId = null;
 
     // High-frequency authentic REST sync poll: fetches real spot rates from ExchangeRate API & Yahoo Finance every 2.0s
     this.restSyncIntervalId = setInterval(() => {

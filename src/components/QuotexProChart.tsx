@@ -240,21 +240,35 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
   const candleCountdownRef = useRef<string>("00:00");
   const [latencyMs, setLatencyMs] = useState<number>(15);
   const [isLoadingCandles, setIsLoadingCandles] = useState<boolean>(false);
-  const [isOnline, setIsOnline] = useState<boolean>(() => typeof navigator !== "undefined" ? navigator.onLine : true);
-  const isOnlineRef = useRef<boolean>(typeof navigator !== "undefined" ? navigator.onLine : true);
+  const [isOnline, setIsOnline] = useState<boolean>(() => livePriceService.isOnline());
+  const isOnlineRef = useRef<boolean>(livePriceService.isOnline());
+  const syncMissingKlinesRef = useRef<() => void>(() => {});
 
   useEffect(() => {
+    const unsubNet = livePriceService.subscribeNetworkStatus((online) => {
+      const wasOffline = !isOnlineRef.current;
+      setIsOnline(online);
+      isOnlineRef.current = online;
+      if (wasOffline && online) {
+        syncMissingKlinesRef.current();
+      }
+    });
+
     const handleOnline = () => {
       setIsOnline(true);
       isOnlineRef.current = true;
+      syncMissingKlinesRef.current();
     };
     const handleOffline = () => {
       setIsOnline(false);
       isOnlineRef.current = false;
+      setCandleCountdown("OFFLINE");
+      candleCountdownRef.current = "OFFLINE";
     };
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
     return () => {
+      unsubNet();
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };
@@ -754,6 +768,10 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
   }, [currentSymbol, timeframeSec]);
 
   useEffect(() => {
+    syncMissingKlinesRef.current = syncMissingKlines;
+  }, [syncMissingKlines]);
+
+  useEffect(() => {
     const handleResume = () => {
       if (document.visibilityState === "visible") {
         livePriceService.reconnectAndRefresh();
@@ -781,7 +799,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
   useEffect(() => {
     let lastUiUpdate = 0;
     const unsub = livePriceService.subscribe((prices) => {
-      if (typeof navigator !== "undefined" && !navigator.onLine) {
+      if (!isOnlineRef.current || (typeof navigator !== "undefined" && !navigator.onLine)) {
         return;
       }
       const newPrice = prices[currentSymbol] ?? livePriceService.getPrice(currentSymbol);
