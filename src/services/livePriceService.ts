@@ -540,6 +540,7 @@ class LivePriceManager {
   private isNetworkLive: boolean = typeof navigator !== "undefined" ? navigator.onLine : true;
   private lastRealInboundTickTime: number = Date.now();
   private lastRealInboundBySymbol: Record<string, number> = {};
+  private exchangeTimeOffsetMs: number = 0;
   private healthProbeIntervalId: any = null;
   private ws: WebSocket | null = null;
   private isWsConnected = false;
@@ -758,6 +759,28 @@ class LivePriceManager {
     return () => {
       this.networkStatusListeners.delete(listener);
     };
+  }
+
+  public syncExchangeTime(exchangeTimestampMs: number) {
+    if (!exchangeTimestampMs || isNaN(exchangeTimestampMs) || exchangeTimestampMs <= 0) return;
+    const nowLocal = Date.now();
+    const diff = exchangeTimestampMs - nowLocal;
+    // Discard unreasonable skew outliers (e.g. > 24 hours)
+    if (Math.abs(diff) > 86400000) return;
+    if (this.exchangeTimeOffsetMs === 0) {
+      this.exchangeTimeOffsetMs = diff;
+    } else {
+      // Exponential moving average to eliminate network latency jitter
+      this.exchangeTimeOffsetMs = Math.round(this.exchangeTimeOffsetMs * 0.85 + diff * 0.15);
+    }
+  }
+
+  public getExchangeTime(): number {
+    return Date.now() + this.exchangeTimeOffsetMs;
+  }
+
+  public getExchangeTimeOffsetMs(): number {
+    return this.exchangeTimeOffsetMs;
   }
 
   public setNetworkStatus(online: boolean) {
@@ -1209,6 +1232,10 @@ class LivePriceManager {
           // A. Real-Time Aggregate Trade Execution stream from Binance (Sub-millisecond real market trades)
           if (message.stream && message.stream.includes("@aggTrade") && message.data) {
             const trade = message.data;
+            const tradeTs = trade.T || trade.E;
+            if (tradeTs && typeof tradeTs === "number") {
+              this.syncExchangeTime(tradeTs);
+            }
             const rawSymbol = (trade.s || "").toUpperCase();
             const newPrice = parseFloat(trade.p);
 
@@ -1348,11 +1375,12 @@ class LivePriceManager {
           } catch (_) {}
         });
 
-        // 15-Second Ping Heartbeat Engine to keep connection 24/7 permanently active with sub-30ms latency
+        // 15-Second Ping & Time Sync Heartbeat Engine to keep connection 24/7 active and sync clock
         this.derivPingInterval = setInterval(() => {
           if (this.derivWs && this.derivWs.readyState === WebSocket.OPEN) {
             try {
               this.derivWs.send(JSON.stringify({ ping: 1 }));
+              this.derivWs.send(JSON.stringify({ time: 1 }));
             } catch (_) {}
           }
         }, 15000);
@@ -1361,6 +1389,10 @@ class LivePriceManager {
       this.derivWs.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+
+          if (data.msg_type === "time" && typeof data.time === "number") {
+            this.syncExchangeTime(data.time * 1000);
+          }
 
           // Handle pending request resolution (ticks_history candles / ticks requests)
           if (data.req_id && this.derivPendingRequests.has(data.req_id)) {
@@ -1373,6 +1405,9 @@ class LivePriceManager {
           // Handle live single tick stream from real market interbank liquidity
           if (data.msg_type === "tick" && data.tick) {
             const t = data.tick;
+            if (t.epoch && typeof t.epoch === "number") {
+              this.syncExchangeTime(t.epoch * 1000);
+            }
             const derivSymbol = t.symbol; // e.g. "frxEURUSD"
             const quote = parseFloat(t.quote);
 

@@ -283,7 +283,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         candleCountdownRef.current = "OFFLINE";
         return;
       }
-      const now = Date.now();
+      const now = livePriceService.getExchangeTime();
       const nowSec = Math.floor(now / 1000);
       const elapsed = nowSec % timeframeSec;
       const remaining = Math.max(1, timeframeSec - elapsed);
@@ -670,7 +670,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
           if (formatted.length > 0) {
             const activeLive = livePriceService.getPrice(currentSymbol);
-            const nowSec = Math.floor(Date.now() / 1000);
+            const nowSec = Math.floor(livePriceService.getExchangeTime() / 1000);
             const currentCandlePeriodSec = Math.floor(nowSec / timeframeSec) * timeframeSec;
 
             const lastCandle = formatted[formatted.length - 1];
@@ -740,7 +740,23 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     try {
       const raw = await livePriceService.fetchHistoricalKlines(currentSymbol, timeframeSec, 80, true);
       if (raw && raw.length > 0 && activeSymbolRef.current === currentSymbol) {
-        const existingLastTime = candlesRef.current[candlesRef.current.length - 1]?.time || 0;
+        const existing = candlesRef.current;
+        if (existing.length === 0) return;
+        const existingLastTime = existing[existing.length - 1]?.time || 0;
+
+        // Reconcile completed past candles with official exchange OHLC
+        raw.forEach((c) => {
+          const rawTime = Number(c.time);
+          const timeSec = rawTime > 10000000000 ? Math.floor(rawTime / 1000) : rawTime;
+          const match = existing.find((ex) => ex.time === timeSec);
+          if (match && timeSec < existingLastTime) {
+            match.open = Number(c.open);
+            match.high = Math.max(match.high, Number(c.high));
+            match.low = Math.min(match.low, Number(c.low));
+            match.close = Number(c.close);
+          }
+        });
+
         const newer = raw
           .map((c) => {
             const rawTime = Number(c.time);
@@ -807,7 +823,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         targetPriceRef.current = newPrice;
         lastValidPricesBySymbolRef.current.set(currentSymbol, newPrice);
 
-        const now = Date.now();
+        const now = livePriceService.getExchangeTime();
         if (now - lastUiUpdate > 80) {
           lastUiUpdate = now;
           setLivePrice(newPrice);
@@ -1431,7 +1447,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
         let liveTimerString = "OFFLINE";
         if (isAppOnline) {
-          const nowStamp = Date.now();
+          const nowStamp = livePriceService.getExchangeTime();
           const nowSec = Math.floor(nowStamp / 1000);
           const elapsed = nowSec % timeframeSec;
           const remaining = Math.max(1, timeframeSec - elapsed);
