@@ -188,7 +188,7 @@ async function fetchServerDerivCandles(
               high: Number(c.high),
               low: Number(c.low),
               close: Number(c.close),
-              volume: Math.floor(25 + Math.random() * 50)
+              volume: Number(c.volume) || 1
             }));
             resolve(formatted);
           } else if (data.msg_type === "history" && data.history && Array.isArray(data.history.times) && Array.isArray(data.history.prices)) {
@@ -219,7 +219,7 @@ async function fetchServerDerivCandles(
               const startT = rawBuckets[0].time;
               const nowMs = Date.now();
               const currentPeriod = Math.floor(nowMs / bucketMs) * bucketMs;
-              const endT = Math.min(currentPeriod, rawBuckets[rawBuckets.length - 1].time + bucketMs * 150);
+              const endT = Math.min(currentPeriod, rawBuckets[rawBuckets.length - 1].time);
 
               let lastKnown = rawBuckets[0];
               let rawIdx = 0;

@@ -274,8 +274,45 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     };
   }, []);
 
+  // Live Candle Rollover Engine: Closes completed candles and opens new candles at exact second boundaries
+  const rolloverCandleIfNeeded = useCallback((nowSec: number, currentPrice: number) => {
+    const currentCandlePeriodSec = Math.floor(nowSec / timeframeSec) * timeframeSec;
+    const all = candlesRef.current;
+    if (all.length === 0) return;
+    const last = all[all.length - 1];
+    if (!last) return;
+
+    if (last.time < currentCandlePeriodSec) {
+      // 1. Finalize completed candle
+      last.high = Math.max(last.open, last.high, last.close);
+      last.low = Math.min(last.open, last.low, last.close);
+      const prev = all.length >= 2 ? all[all.length - 2] : undefined;
+      const pat = detectCandlePattern(last, prev);
+      last.pattern = pat.pattern;
+      last.signal = pat.signal;
+
+      if (currentCandlePeriodSec - last.time <= timeframeSec) {
+        // Standard single candle rollover
+        const openP = last.close > 0 ? last.close : currentPrice;
+        all.push({
+          time: currentCandlePeriodSec,
+          open: openP,
+          high: Math.max(openP, currentPrice),
+          low: Math.min(openP, currentPrice),
+          close: currentPrice,
+          volume: 1
+        });
+        while (all.length > 300) all.shift();
+        setCandlesVersion((v) => v + 1);
+      } else {
+        // Gap was larger than 1 candle (e.g. app was offline or asleep)
+        syncMissingKlinesRef.current();
+      }
+    }
+  }, [timeframeSec]);
+
   // Live Candle Countdown Timer & Wall-Clock Heartbeat Synchronizer
-  // Lightweight second-by-second React state updater for external consumers
+  // Counts down from (timeframeSec - 1) down to 00:00 (exact candle close)
   useEffect(() => {
     const updateCountdown = () => {
       if (!isOnlineRef.current) {
@@ -286,19 +323,24 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       const now = livePriceService.getExchangeTime();
       const nowSec = Math.floor(now / 1000);
       const elapsed = nowSec % timeframeSec;
-      const remaining = Math.max(1, timeframeSec - elapsed);
+      const remaining = Math.max(0, (timeframeSec - 1) - elapsed);
       setCandleSecondsRemaining(remaining);
       const mins = Math.floor(remaining / 60);
       const secs = remaining % 60;
       const formatted = `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
       setCandleCountdown(formatted);
       candleCountdownRef.current = formatted;
+
+      const activeP = targetPriceRef.current || renderPriceRef.current || 0;
+      if (activeP > 0) {
+        rolloverCandleIfNeeded(nowSec, activeP);
+      }
     };
 
     updateCountdown();
-    const interval = setInterval(updateCountdown, 1000);
+    const interval = setInterval(updateCountdown, 250);
     return () => clearInterval(interval);
-  }, [timeframeSec]);
+  }, [timeframeSec, rolloverCandleIfNeeded]);
 
   // 60 FPS Smooth Interpolation Refs
   const renderPriceRef = useRef<number>(livePrice);
@@ -646,20 +688,13 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
             let high = Math.max(open, close, isFinite(rawHigh) ? rawHigh : open);
             let low = Math.min(open, close, isFinite(rawLow) && rawLow > 0 ? rawLow : open);
 
-            if (high <= low || Math.abs(high - low) < 0.000001) {
-              const isJpy = currentSymbol.includes("JPY");
-              const pip = isJpy ? 0.005 : Math.max(0.00002, close * 0.000015);
-              high = Math.max(open, close) + pip;
-              low = Math.min(open, close) - pip;
-            }
-
             const candleObj: Candle = {
               time: timeSec,
               open,
               high,
               low,
               close,
-              volume: Number(c.volume) || 10
+              volume: Number(c.volume) || 1
             };
             const prev = formatted.length > 0 ? formatted[formatted.length - 1] : undefined;
             const pat = detectCandlePattern(candleObj, prev);
@@ -679,28 +714,24 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
                 if (activeLive && activeLive > 0) {
                   lastCandle.close = activeLive;
                   lastCandle.high = Math.max(lastCandle.high, activeLive);
-                  if (lastCandle.low <= 0 || isNaN(lastCandle.low) || (lastCandle.open > 0 && lastCandle.low < lastCandle.open * 0.80)) {
+                  if (lastCandle.low <= 0 || isNaN(lastCandle.low)) {
                     lastCandle.low = Math.min(lastCandle.open, activeLive);
                   } else {
                     lastCandle.low = Math.min(lastCandle.low, activeLive);
                   }
                 }
-              } else {
-                let nextPeriod = lastCandle.time + timeframeSec;
-                while (nextPeriod <= currentCandlePeriodSec) {
-                  const prevClose = formatted[formatted.length - 1].close || (activeLive || lastCandle.close);
-                  const isCurrent = nextPeriod === currentCandlePeriodSec;
-                  const curP = isCurrent && activeLive && activeLive > 0 ? activeLive : prevClose;
-                  formatted.push({
-                    time: nextPeriod,
-                    open: prevClose,
-                    high: Math.max(prevClose, curP),
-                    low: Math.min(prevClose, curP),
-                    close: curP,
-                    volume: 1
-                  });
-                  nextPeriod += timeframeSec;
-                }
+              } else if (currentCandlePeriodSec - lastCandle.time === timeframeSec) {
+                // Exactly 1 candle rollover
+                const prevClose = lastCandle.close > 0 ? lastCandle.close : (activeLive || 100);
+                const curP = activeLive && activeLive > 0 ? activeLive : prevClose;
+                formatted.push({
+                  time: currentCandlePeriodSec,
+                  open: prevClose,
+                  high: Math.max(prevClose, curP),
+                  low: Math.min(prevClose, curP),
+                  close: curP,
+                  volume: 1
+                });
               }
             }
 
@@ -744,16 +775,18 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         if (existing.length === 0) return;
         const existingLastTime = existing[existing.length - 1]?.time || 0;
 
-        // Reconcile completed past candles with official exchange OHLC
+        // Reconcile completed past candles and active forming candle with official exchange OHLC
         raw.forEach((c) => {
           const rawTime = Number(c.time);
           const timeSec = rawTime > 10000000000 ? Math.floor(rawTime / 1000) : rawTime;
           const match = existing.find((ex) => ex.time === timeSec);
-          if (match && timeSec < existingLastTime) {
+          if (match) {
             match.open = Number(c.open);
             match.high = Math.max(match.high, Number(c.high));
             match.low = Math.min(match.low, Number(c.low));
-            match.close = Number(c.close);
+            if (timeSec < existingLastTime) {
+              match.close = Number(c.close);
+            }
           }
         });
 
@@ -838,49 +871,23 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
           }
 
           const nowSec = Math.floor(now / 1000);
-          const currentCandlePeriodSec = Math.floor(nowSec / timeframeSec) * timeframeSec;
+          rolloverCandleIfNeeded(nowSec, newPrice);
 
-          if (last.time < currentCandlePeriodSec) {
-            // Finalize completed candle
-            last.high = Math.max(last.open, last.high, last.close);
-            last.low = Math.min(last.open, last.low, last.close);
-            const prev = all.length >= 2 ? all[all.length - 2] : undefined;
-            const pat = detectCandlePattern(last, prev);
-            last.pattern = pat.pattern;
-            last.signal = pat.signal;
-
-            if (currentCandlePeriodSec - last.time <= timeframeSec) {
-              // Standard single candle rollover
-              const openP = last.close > 0 ? last.close : newPrice;
-              all.push({
-                time: currentCandlePeriodSec,
-                open: openP,
-                high: Math.max(openP, newPrice),
-                low: Math.min(openP, newPrice),
-                close: newPrice,
-                volume: 1
-              });
-              while (all.length > 300) all.shift();
-              setCandlesVersion((v) => v + 1);
+          const currentActive = all[all.length - 1];
+          if (currentActive) {
+            // Update active candle with real tick price
+            currentActive.close = newPrice;
+            currentActive.high = Math.max(currentActive.high, newPrice);
+            if (currentActive.low <= 0 || isNaN(currentActive.low)) {
+              currentActive.low = Math.min(currentActive.open, newPrice);
             } else {
-              // Gap was larger than 1 candle (e.g. app was offline or asleep)
-              // NEVER generate fake dojis: fetch real market klines silently from the exchange
-              syncMissingKlines();
+              currentActive.low = Math.min(currentActive.low, newPrice);
             }
-          } else {
-            // Update active candle
-            last.close = newPrice;
-            last.high = Math.max(last.high, newPrice);
-            if (last.low <= 0 || isNaN(last.low) || (last.open > 0 && last.low < last.open * 0.80)) {
-              last.low = Math.min(last.open, newPrice);
-            } else {
-              last.low = Math.min(last.low, newPrice);
-            }
-            last.volume = (last.volume || 1) + 1;
+            currentActive.volume = (currentActive.volume || 1) + 1;
             const prev = all.length >= 2 ? all[all.length - 2] : undefined;
-            const pat = detectCandlePattern(last, prev);
-            last.pattern = pat.pattern;
-            last.signal = pat.signal;
+            const pat = detectCandlePattern(currentActive, prev);
+            currentActive.pattern = pat.pattern;
+            currentActive.signal = pat.signal;
           }
         }
       }
@@ -1450,7 +1457,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
           const nowStamp = livePriceService.getExchangeTime();
           const nowSec = Math.floor(nowStamp / 1000);
           const elapsed = nowSec % timeframeSec;
-          const remaining = Math.max(1, timeframeSec - elapsed);
+          const remaining = Math.max(0, (timeframeSec - 1) - elapsed);
           const mins = Math.floor(remaining / 60);
           const secs = remaining % 60;
           liveTimerString = `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;

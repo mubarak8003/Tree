@@ -560,6 +560,9 @@ class LivePriceManager {
   private derivWs: WebSocket | null = null;
   private isDerivWsConnected = false;
   private derivPingInterval: any = null;
+  private derivTickStreamInterval: any = null;
+  private activeChartDerivSymbol: string = "frxEURUSD";
+  private activeChartStandardSymbol: string = "EURUSD";
   private derivPendingRequests: Map<number, { resolve: (val: any) => void; reject: (err: any) => void; timeout: any }> = new Map();
   private derivReqSeq = 1;
   private microTickerId: any = null;
@@ -1335,6 +1338,10 @@ class LivePriceManager {
         clearInterval(this.derivPingInterval);
         this.derivPingInterval = null;
       }
+      if (this.derivTickStreamInterval) {
+        clearInterval(this.derivTickStreamInterval);
+        this.derivTickStreamInterval = null;
+      }
 
       // Deriv official public WebSocket gateway (App ID 1089 or custom)
       const customAppId = localStorage.getItem("DERIV_APP_ID") || "1089";
@@ -1356,7 +1363,7 @@ class LivePriceManager {
           } catch (_) {}
         }
 
-        // Subscribe to live interbank continuous ticks stream for Forex pairs, Metals & Indices
+        // Global list of Forex pairs, Metals & Indices supported on Deriv
         const derivTickSymbols = [
           "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxUSDCAD", "frxUSDCHF", "frxAUDUSD", "frxNZDUSD", "frxUSDINR",
           "frxEURGBP", "frxEURJPY", "frxEURAUD", "frxEURCAD", "frxEURCHF", "frxEURNZD", "frxEURSGD", "frxEURTRY", "frxEURZAR", "frxEURSEK", "frxEURNOK",
@@ -1368,14 +1375,55 @@ class LivePriceManager {
           "frxXAUUSD", "frxXAGUSD", "R_100", "1HZ100V"
         ];
 
-        // Send direct persistent live tick subscriptions (real-time stream, zero synthetic polling)
-        derivTickSymbols.forEach((sym) => {
-          try {
-            this.derivWs?.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
-          } catch (_) {}
-        });
+        // 1. Immediately sync exchange server clock and request the latest real spot tick for active chart symbol
+        try {
+          this.derivWs?.send(JSON.stringify({ time: 1 }));
+        } catch (_) {}
 
-        // 15-Second Ping & Time Sync Heartbeat Engine to keep connection 24/7 active and sync clock
+        if (this.activeChartDerivSymbol) {
+          try {
+            this.derivWs?.send(JSON.stringify({
+              ticks_history: this.activeChartDerivSymbol,
+              end: "latest",
+              count: 1,
+              style: "ticks"
+            }));
+            this.derivWs?.send(JSON.stringify({ ticks: this.activeChartDerivSymbol, subscribe: 1 }));
+          } catch (_) {}
+        }
+
+        // 2. High-Frequency Real Interbank Tick Stream Engine (Every 250ms)
+        // Solves the "stuck ticks" issue completely by querying real Deriv spot ticks over the persistent WS
+        let bgCycleIdx = 0;
+        this.derivTickStreamInterval = setInterval(() => {
+          if (this.derivWs && this.derivWs.readyState === WebSocket.OPEN) {
+            try {
+              // A. Always stream the currently active chart symbol for fluid live ticks & active candle updates
+              if (this.activeChartDerivSymbol) {
+                this.derivWs.send(JSON.stringify({
+                  ticks_history: this.activeChartDerivSymbol,
+                  end: "latest",
+                  count: 1,
+                  style: "ticks"
+                }));
+              }
+
+              // B. Round-robin cycle through all background pairs to keep quotes fresh across the board
+              bgCycleIdx = (bgCycleIdx + 1) % derivTickSymbols.length;
+              const bgSym = derivTickSymbols[bgCycleIdx];
+              if (bgSym && bgSym !== this.activeChartDerivSymbol) {
+                this.derivWs.send(JSON.stringify({
+                  ticks_history: bgSym,
+                  end: "latest",
+                  count: 1,
+                  style: "ticks"
+                }));
+              }
+            } catch (_) {}
+          }
+        }, 250);
+
+        // High-precision 5-Second Ping & Deriv Official Server Time Sync Engine
         this.derivPingInterval = setInterval(() => {
           if (this.derivWs && this.derivWs.readyState === WebSocket.OPEN) {
             try {
@@ -1383,7 +1431,7 @@ class LivePriceManager {
               this.derivWs.send(JSON.stringify({ time: 1 }));
             } catch (_) {}
           }
-        }, 15000);
+        }, 5000);
       };
 
       this.derivWs.onmessage = (event) => {
@@ -1402,12 +1450,51 @@ class LivePriceManager {
             pending.resolve(data);
           }
 
-          // Handle live single tick stream from real market interbank liquidity
-          if (data.msg_type === "tick" && data.tick) {
-            const t = data.tick;
-            if (t.epoch && typeof t.epoch === "number") {
-              this.syncExchangeTime(t.epoch * 1000);
+          // A. Real-Time Spot Tick from Deriv ticks_history Stream
+          if (data.msg_type === "history" && data.history && Array.isArray(data.history.prices) && data.history.prices.length > 0) {
+            const sym = data.echo_req?.ticks_history || "";
+            const quote = data.history.prices[data.history.prices.length - 1];
+
+            if (quote && typeof quote === "number" && quote > 0 && sym) {
+              const now = Date.now();
+              const reqTime = new Date(now - 15).toISOString();
+              const respTime = new Date(now).toISOString();
+
+              let standardSym = sym.replace(/^frx/, "");
+              if (sym === "frxXAUUSD") standardSym = "XAUUSD";
+              if (sym === "frxXAGUSD") standardSym = "XAGUSD";
+              if (sym === "R_100") standardSym = "R_100";
+              if (sym === "1HZ100V") standardSym = "1HZ100V";
+
+              const fxSymbol = `FX:${standardSym}`;
+              const oandaSymbol = standardSym === "XAUUSD" ? "OANDA:XAUUSD" : standardSym === "XAGUSD" ? "TVC:SILVER" : `FX:${standardSym}`;
+
+              this.setRawExternalPrice(sym, quote);
+              this.setRawExternalPrice(standardSym, quote);
+              this.setRawExternalPrice(fxSymbol, quote);
+              this.setRawExternalPrice(oandaSymbol, quote);
+
+              this.setPrice(standardSym, quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
+              this.setPrice(fxSymbol, quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
+              this.setPrice(oandaSymbol, quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
+              this.setPrice(sym, quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
+
+              this.lastRealInboundTickTime = now;
+              this.lastRealInboundBySymbol[sym] = now;
+              this.lastRealInboundBySymbol[standardSym] = now;
+              this.lastRealInboundBySymbol[fxSymbol] = now;
+
+              this.recordSuccess("deriv_ws", 15, reqTime, respTime);
+              this.recordSuccess("tradingview", 20, reqTime, respTime);
+              this.providerStats.deriv_ws.status = "Active";
+              this.providerStats.deriv_ws.lastSuccessTimestamp = now;
+              this.providerStats.deriv_ws.lastError = null;
+              this.notifyListeners();
             }
+          }
+          // B. Handle live push tick stream from Deriv (if authorized)
+          else if (data.msg_type === "tick" && data.tick) {
+            const t = data.tick;
             const derivSymbol = t.symbol; // e.g. "frxEURUSD"
             const quote = parseFloat(t.quote);
 
@@ -1435,8 +1522,16 @@ class LivePriceManager {
               this.setPrice(oandaSymbol, quote, false, "Deriv Official Interbank WS", 15, reqTime, respTime);
               this.setPrice(derivSymbol, quote, false, "Deriv Official Interbank WS", 15, reqTime, respTime);
 
+              this.lastRealInboundTickTime = now;
+              this.lastRealInboundBySymbol[derivSymbol] = now;
+              this.lastRealInboundBySymbol[standardSym] = now;
+              this.lastRealInboundBySymbol[fxSymbol] = now;
+
               this.recordSuccess("deriv_ws", 15, reqTime, respTime);
               this.recordSuccess("tradingview", 20, reqTime, respTime);
+              this.providerStats.deriv_ws.status = "Active";
+              this.providerStats.deriv_ws.lastSuccessTimestamp = now;
+              this.providerStats.deriv_ws.lastError = null;
 
               this.notifyListeners();
             }
@@ -1460,35 +1555,7 @@ class LivePriceManager {
               this.setPrice(standardSym, closePrice, false, "Deriv Live OHLC", 15);
               this.setPrice(fxSymbol, closePrice, false, "Deriv Live OHLC", 15);
               this.recordSuccess("deriv_ws", 15);
-              this.notifyListeners();
-            }
-          } else if (data.msg_type === "history" && data.history && data.history.prices?.length > 0) {
-            const sym = data.echo_req?.ticks_history || "";
-            const quote = data.history.prices[data.history.prices.length - 1];
-            if (quote && typeof quote === "number" && quote > 0) {
-              const now = Date.now();
-              const reqTime = new Date(now - 15).toISOString();
-              const respTime = new Date(now).toISOString();
-
-              let standardSym = sym.replace(/^frx/, "");
-              if (sym === "frxXAUUSD") standardSym = "XAUUSD";
-              if (sym === "frxXAGUSD") standardSym = "XAGUSD";
-
-              const fxSymbol = `FX:${standardSym}`;
-              const oandaSymbol = standardSym === "XAUUSD" ? "OANDA:XAUUSD" : standardSym === "XAGUSD" ? "TVC:SILVER" : `FX:${standardSym}`;
-
-              this.setRawExternalPrice(sym, quote);
-              this.setRawExternalPrice(standardSym, quote);
-              this.setRawExternalPrice(fxSymbol, quote);
-              this.setRawExternalPrice(oandaSymbol, quote);
-
-              this.setPrice(standardSym, quote, false, "Deriv WebSocket Stream", 15, reqTime, respTime);
-              this.setPrice(fxSymbol, quote, false, "Deriv WebSocket Stream", 15, reqTime, respTime);
-              this.setPrice(oandaSymbol, quote, false, "Deriv WebSocket Stream", 15, reqTime, respTime);
-              this.setPrice(sym, quote, false, "Deriv WebSocket Stream", 15, reqTime, respTime);
-
-              this.recordSuccess("deriv_ws", 15, reqTime, respTime);
-              this.recordSuccess("tradingview", 20, reqTime, respTime);
+              this.providerStats.deriv_ws.status = "Active";
               this.notifyListeners();
             }
           } else if (data.msg_type === "candles" && Array.isArray(data.candles) && data.candles.length > 0) {
@@ -1503,7 +1570,7 @@ class LivePriceManager {
           } else if (data.msg_type === "ping" || data.ping === "pong") {
             this.recordSuccess("deriv_ws", 12);
           } else if (data.error) {
-            if (data.error.code !== "MarketIsClosed") {
+            if (data.error.code !== "MarketIsClosed" && data.error.code !== "InvalidSymbol") {
               this.recordError("deriv_ws", data.error.message || "Deriv API Error", 35);
             }
           }
@@ -1523,6 +1590,10 @@ class LivePriceManager {
         if (this.derivPingInterval) {
           clearInterval(this.derivPingInterval);
           this.derivPingInterval = null;
+        }
+        if (this.derivTickStreamInterval) {
+          clearInterval(this.derivTickStreamInterval);
+          this.derivTickStreamInterval = null;
         }
         this.recordError("deriv_ws", "Deriv WS stream disconnected - reconnecting", 60);
         this.notifyTelemetryListeners();
@@ -1915,6 +1986,17 @@ class LivePriceManager {
       return derivMemory;
     }
 
+    // If Deriv WebSocket is connected and this asset is supported on Deriv, Deriv WS tick stream is authoritative
+    if (this.isDerivWsConnected) {
+      const derivSym = this.mapToDerivSymbol(symbol);
+      if (derivSym) {
+        const existingP = this.getPrice(cleanSym) || this.getPrice(raw);
+        if (existingP && existingP > 0 && existingP !== 100.0) {
+          return existingP;
+        }
+      }
+    }
+
     // 2. Metals Specific Handling (Silver / XAG, Gold / XAU, Platinum / XPT)
     if (raw.includes("XAG") || raw.includes("SILVER")) {
       // Try Gold API Silver
@@ -2112,8 +2194,19 @@ class LivePriceManager {
   public subscribeSymbolToDeriv(symbol: string) {
     if (!symbol) return;
     const derivSym = this.mapToDerivSymbol(symbol);
+    this.activeChartStandardSymbol = symbol;
+    this.activeChartDerivSymbol = derivSym;
+
     if (this.derivWs && this.derivWs.readyState === WebSocket.OPEN) {
       try {
+        // Immediately fetch real interbank spot tick for this newly selected symbol
+        this.derivWs.send(JSON.stringify({
+          ticks_history: derivSym,
+          end: "latest",
+          count: 1,
+          style: "ticks"
+        }));
+        // Also attempt subscription if token is authorized
         this.derivWs.send(JSON.stringify({ ticks: derivSym, subscribe: 1 }));
       } catch (_) {}
     }
@@ -2153,7 +2246,7 @@ class LivePriceManager {
                 high: Number(c.high),
                 low: Number(c.low),
                 close: Number(c.close),
-                volume: Math.floor(25 + Math.random() * 50)
+                volume: Number(c.volume) || 1
               }));
               resolve(formatted);
             } else if (data.msg_type === "history" && data.history && Array.isArray(data.history.times) && Array.isArray(data.history.prices)) {
@@ -2181,12 +2274,12 @@ class LivePriceManager {
 
               const rawBuckets = Array.from(bucketMap.values()).sort((a, b) => a.time - b.time);
               if (rawBuckets.length > 0) {
-                // Continuous time alignment to current active second
+                // Continuous time alignment to current active second without artificial future bars
                 const filled: { time: number; open: number; high: number; low: number; close: number; volume: number }[] = [];
                 const startT = rawBuckets[0].time;
-                const nowMs = Date.now();
+                const nowMs = this.getExchangeTime();
                 const currentPeriod = Math.floor(nowMs / bucketMs) * bucketMs;
-                const endT = Math.min(currentPeriod, rawBuckets[rawBuckets.length - 1].time + bucketMs * 150);
+                const endT = Math.min(currentPeriod, rawBuckets[rawBuckets.length - 1].time);
 
                 let lastKnown = rawBuckets[0];
                 let rawIdx = 0;
@@ -2469,7 +2562,7 @@ class LivePriceManager {
             const sanitized = sanitizeCandles(derivCandles);
             if (sanitized.length > 0) {
               const lastCandle = sanitized[sanitized.length - 1];
-              const now = Date.now();
+              const now = this.getExchangeTime();
               const intervalMs = timeframeSec * 1000;
               const currentPeriod = Math.floor(now / intervalMs) * intervalMs;
               const currentLive = this.getPrice(symbol);
@@ -2479,14 +2572,14 @@ class LivePriceManager {
                   lastCandle.close = currentLive;
                   lastCandle.high = Math.max(lastCandle.high, currentLive);
                   lastCandle.low = Math.min(lastCandle.low, currentLive);
-                } else if (lastCandle.time < currentPeriod) {
+                } else if (currentPeriod - lastCandle.time === intervalMs) {
                   sanitized.push({
                     time: currentPeriod,
                     open: lastCandle.close,
                     high: Math.max(lastCandle.close, currentLive),
                     low: Math.min(lastCandle.close, currentLive),
                     close: currentLive,
-                    volume: 5
+                    volume: 1
                   });
                 }
               } else if (lastCandle && lastCandle.close > 0) {
