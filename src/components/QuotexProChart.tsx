@@ -240,11 +240,35 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
   const candleCountdownRef = useRef<string>("00:00");
   const [latencyMs, setLatencyMs] = useState<number>(15);
   const [isLoadingCandles, setIsLoadingCandles] = useState<boolean>(false);
+  const [isOnline, setIsOnline] = useState<boolean>(() => typeof navigator !== "undefined" ? navigator.onLine : true);
+  const isOnlineRef = useRef<boolean>(typeof navigator !== "undefined" ? navigator.onLine : true);
+
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      isOnlineRef.current = true;
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      isOnlineRef.current = false;
+    };
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
 
   // Live Candle Countdown Timer & Wall-Clock Heartbeat Synchronizer
   // Lightweight second-by-second React state updater for external consumers
   useEffect(() => {
     const updateCountdown = () => {
+      if (!isOnlineRef.current) {
+        setCandleCountdown("OFFLINE");
+        candleCountdownRef.current = "OFFLINE";
+        return;
+      }
       const now = Date.now();
       const nowSec = Math.floor(now / 1000);
       const elapsed = nowSec % timeframeSec;
@@ -505,7 +529,6 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     let hasImmediateCandles = false;
     if (candleHistoryCacheRef.current.has(cacheKey)) {
       const cached = candleHistoryCacheRef.current.get(cacheKey)!;
-      // Ensure cached candles match current symbol's price level to prevent cross-asset corruption
       const firstValidClose = cached.length > 0 ? cached[cached.length - 1].close : 0;
       const isCachePriceValid = initialPrice <= 0 || (firstValidClose > 0 && Math.abs(firstValidClose - initialPrice) / initialPrice < 0.25);
 
@@ -535,8 +558,10 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         const cl = Number(c.close);
         const h = Math.max(o, cl, Number(c.high) || o);
         const l = Math.min(o, cl, Number(c.low) > 0 ? Number(c.low) : o);
+        const rawTime = Number(c.time);
+        const timeSec = rawTime > 10000000000 ? Math.floor(rawTime / 1000) : rawTime;
         return {
-          time: Number(c.time),
+          time: timeSec,
           open: o,
           high: h,
           low: l,
@@ -570,12 +595,10 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       candlesRef.current = [];
     }
 
-    // Only show loading if we don't have immediate cached candles
     if (!hasImmediateCandles) {
       setIsLoadingCandles(true);
     }
 
-    // Absolute safety timer: Loading overlay NEVER stays longer than 450ms under any network condition
     const safetyTimer = setTimeout(() => {
       if (!isCancelled) {
         setIsLoadingCandles(false);
@@ -584,7 +607,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
     const loadRealKlines = async () => {
       try {
-        const rawCandles = await livePriceService.fetchHistoricalKlines(currentSymbol, timeframeSec, 250, true);
+        const rawCandles = await livePriceService.fetchHistoricalKlines(currentSymbol, timeframeSec, 250, false);
         if (
           isCancelled ||
           switchSeqRef.current !== currentSeq ||
@@ -603,6 +626,8 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
             const close = Number(c.close);
             const rawHigh = Number(c.high);
             const rawLow = Number(c.low);
+            const rawTime = Number(c.time);
+            const timeSec = rawTime > 10000000000 ? Math.floor(rawTime / 1000) : rawTime;
 
             let high = Math.max(open, close, isFinite(rawHigh) ? rawHigh : open);
             let low = Math.min(open, close, isFinite(rawLow) && rawLow > 0 ? rawLow : open);
@@ -615,7 +640,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
             }
 
             const candleObj: Candle = {
-              time: Number(c.time),
+              time: timeSec,
               open,
               high,
               low,
@@ -631,14 +656,12 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
           if (formatted.length > 0) {
             const activeLive = livePriceService.getPrice(currentSymbol);
-            const now = Date.now();
-            const intervalMs = timeframeSec * 1000;
-            const currentCandlePeriod = Math.floor(now / intervalMs) * intervalMs;
+            const nowSec = Math.floor(Date.now() / 1000);
+            const currentCandlePeriodSec = Math.floor(nowSec / timeframeSec) * timeframeSec;
 
             const lastCandle = formatted[formatted.length - 1];
             if (lastCandle) {
-              if (lastCandle.time >= currentCandlePeriod) {
-                // The last candle is already the active forming candle directly from exchange
+              if (lastCandle.time >= currentCandlePeriodSec) {
                 if (activeLive && activeLive > 0) {
                   lastCandle.close = activeLive;
                   lastCandle.high = Math.max(lastCandle.high, activeLive);
@@ -649,18 +672,21 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
                   }
                 }
               } else {
-                // Historical data ended on previous closed period; append new active candle
-                const curP = (activeLive && activeLive > 0) ? activeLive : lastCandle.close;
-                const openP = lastCandle.close > 0 ? lastCandle.close : curP;
-                const newCandle: Candle = {
-                  time: currentCandlePeriod,
-                  open: openP,
-                  high: Math.max(openP, curP),
-                  low: Math.min(openP, curP),
-                  close: curP,
-                  volume: 1
-                };
-                formatted.push(newCandle);
+                let nextPeriod = lastCandle.time + timeframeSec;
+                while (nextPeriod <= currentCandlePeriodSec) {
+                  const prevClose = formatted[formatted.length - 1].close || (activeLive || lastCandle.close);
+                  const isCurrent = nextPeriod === currentCandlePeriodSec;
+                  const curP = isCurrent && activeLive && activeLive > 0 ? activeLive : prevClose;
+                  formatted.push({
+                    time: nextPeriod,
+                    open: prevClose,
+                    high: Math.max(prevClose, curP),
+                    low: Math.min(prevClose, curP),
+                    close: curP,
+                    volume: 1
+                  });
+                  nextPeriod += timeframeSec;
+                }
               }
             }
 
@@ -694,19 +720,51 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     };
   }, [currentSymbol, timeframeSec]);
 
-    // App / Tab Resume Synchronizer (Visibility & Focus)
-  // When user returns from another app/tab:
-  // Silently ensure WebSocket connections are alive without wiping or replacing canvas candles
+  // App / Tab Resume Synchronizer (Visibility & Focus)
+  const syncMissingKlines = useCallback(async () => {
+    if (typeof navigator !== "undefined" && !navigator.onLine) return;
+    try {
+      const raw = await livePriceService.fetchHistoricalKlines(currentSymbol, timeframeSec, 80, true);
+      if (raw && raw.length > 0 && activeSymbolRef.current === currentSymbol) {
+        const existingLastTime = candlesRef.current[candlesRef.current.length - 1]?.time || 0;
+        const newer = raw
+          .map((c) => {
+            const rawTime = Number(c.time);
+            const timeSec = rawTime > 10000000000 ? Math.floor(rawTime / 1000) : rawTime;
+            return {
+              time: timeSec,
+              open: Number(c.open),
+              high: Number(c.high),
+              low: Number(c.low),
+              close: Number(c.close),
+              volume: Number(c.volume) || 1
+            };
+          })
+          .filter((c) => c.time > existingLastTime);
+
+        if (newer.length > 0) {
+          candlesRef.current = [...candlesRef.current, ...newer];
+          while (candlesRef.current.length > 300) candlesRef.current.shift();
+          setCandlesVersion((v) => v + 1);
+        }
+      }
+    } catch (e) {
+      console.warn("Silent resume sync error:", e);
+    }
+  }, [currentSymbol, timeframeSec]);
+
   useEffect(() => {
     const handleResume = () => {
       if (document.visibilityState === "visible") {
         livePriceService.reconnectAndRefresh();
+        syncMissingKlines();
       }
     };
 
     const handleFocus = () => {
       if (document.visibilityState === "visible") {
         livePriceService.reconnectAndRefresh();
+        syncMissingKlines();
       }
     };
 
@@ -717,12 +775,15 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       document.removeEventListener("visibilitychange", handleResume);
       window.removeEventListener("focus", handleFocus);
     };
-  }, []);
+  }, [syncMissingKlines]);
 
   // Subscribe to live price stream
   useEffect(() => {
     let lastUiUpdate = 0;
     const unsub = livePriceService.subscribe((prices) => {
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        return;
+      }
       const newPrice = prices[currentSymbol] ?? livePriceService.getPrice(currentSymbol);
       if (typeof newPrice === "number" && !isNaN(newPrice) && isFinite(newPrice) && newPrice > 0) {
         targetPriceRef.current = newPrice;
@@ -738,15 +799,14 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         const all = candlesRef.current;
         if (all.length > 0) {
           const last = all[all.length - 1];
-          // Guard: If the candle in memory belongs to a different asset from previous symbol before re-fetch completed
           if (last && last.close > 0 && Math.abs(newPrice - last.close) / last.close > 0.25) {
             return;
           }
 
-          const intervalMs = timeframeSec * 1000;
-          const currentCandlePeriod = Math.floor(now / intervalMs) * intervalMs;
+          const nowSec = Math.floor(now / 1000);
+          const currentCandlePeriodSec = Math.floor(nowSec / timeframeSec) * timeframeSec;
 
-          if (last.time < currentCandlePeriod) {
+          if (last.time < currentCandlePeriodSec) {
             // Finalize completed candle
             last.high = Math.max(last.open, last.high, last.close);
             last.low = Math.min(last.open, last.low, last.close);
@@ -755,22 +815,28 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
             last.pattern = pat.pattern;
             last.signal = pat.signal;
 
-            // Roll new candle - anchor open strictly to previous candle close to eliminate false gap opens
-            const openP = (last && last.close > 0) ? last.close : newPrice;
-            all.push({
-              time: currentCandlePeriod,
-              open: openP,
-              high: Math.max(openP, newPrice),
-              low: Math.min(openP, newPrice),
-              close: newPrice,
-              volume: 1
-            });
-            if (all.length > 300) all.shift();
+            if (currentCandlePeriodSec - last.time <= timeframeSec) {
+              // Standard single candle rollover
+              const openP = last.close > 0 ? last.close : newPrice;
+              all.push({
+                time: currentCandlePeriodSec,
+                open: openP,
+                high: Math.max(openP, newPrice),
+                low: Math.min(openP, newPrice),
+                close: newPrice,
+                volume: 1
+              });
+              while (all.length > 300) all.shift();
+              setCandlesVersion((v) => v + 1);
+            } else {
+              // Gap was larger than 1 candle (e.g. app was offline or asleep)
+              // NEVER generate fake dojis: fetch real market klines silently from the exchange
+              syncMissingKlines();
+            }
           } else {
-            // Update active candle and calculate live forming pattern
+            // Update active candle
             last.close = newPrice;
             last.high = Math.max(last.high, newPrice);
-            // Protect last.low from anomalous spikes
             if (last.low <= 0 || isNaN(last.low) || (last.open > 0 && last.low < last.open * 0.80)) {
               last.low = Math.min(last.open, newPrice);
             } else {
@@ -789,7 +855,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     return () => {
       unsub();
     };
-  }, [currentSymbol, timeframeSec]);
+  }, [currentSymbol, timeframeSec, syncMissingKlines]);
 
   // Main Canvas Rendering Engine
   useEffect(() => {
@@ -847,31 +913,14 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         return;
       }
 
-      // Timeframe Boundary Clock Synchronizer:
-      // Ensures the new candle opens at the exact second interval (e.g. 5s, 15s, 1m) even before the next tick arrives
-      const now = Date.now();
-      const intervalMs = timeframeSec * 1000;
-      const currentCandlePeriod = Math.floor(now / intervalMs) * intervalMs;
+      // Update forming candle visual price if online and a valid price exists
       const lastC = allCandles[allCandles.length - 1];
-
-      if (lastC && lastC.time < currentCandlePeriod) {
-        lastC.high = Math.max(lastC.open, lastC.high, lastC.close);
-        lastC.low = Math.min(lastC.open, lastC.low, lastC.close);
-        const prev = allCandles.length >= 2 ? allCandles[allCandles.length - 2] : undefined;
-        const pat = detectCandlePattern(lastC, prev);
-        lastC.pattern = pat.pattern;
-        lastC.signal = pat.signal;
-
-        const openP = lastC.close > 0 ? lastC.close : activeDrawPrice;
-        allCandles.push({
-          time: currentCandlePeriod,
-          open: openP,
-          high: openP,
-          low: openP,
-          close: openP,
-          volume: 1
-        });
-        if (allCandles.length > 300) allCandles.shift();
+      if (lastC && activeDrawPrice > 0 && isOnlineRef.current) {
+        lastC.close = activeDrawPrice;
+        lastC.high = Math.max(lastC.high, activeDrawPrice);
+        if (lastC.low > 0) {
+          lastC.low = Math.min(lastC.low, activeDrawPrice);
+        }
       }
 
       // Viewport slice based on zoom & pan
@@ -953,17 +1002,18 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       const timeSpan = Math.max(1, lastCandleTime - firstCandleTime);
 
       const timeToX = (time: number) => {
-        const idx = visibleCandles.findIndex((c) => Math.abs(c.time - time) < (timeframeSec * 1000) / 2);
+        const targetSec = time > 10000000000 ? Math.floor(time / 1000) : time;
+        const idx = visibleCandles.findIndex((c) => Math.abs(c.time - targetSec) < timeframeSec / 2);
         if (idx >= 0) {
           return idx * candleWidth + candleWidth / 2;
         }
-        const ratio = (time - firstCandleTime) / timeSpan;
+        const ratio = (targetSec - firstCandleTime) / timeSpan;
         return ratio * (visibleCandles.length * candleWidth - candleWidth) + candleWidth / 2;
       };
 
       const xToTime = (x: number) => {
         const idx = Math.max(0, Math.min(visibleCandles.length - 1, Math.floor(x / candleWidth)));
-        return visibleCandles[idx]?.time || Date.now();
+        return visibleCandles[idx]?.time || Math.floor(Date.now() / 1000);
       };
 
       transformRef.current = {
@@ -1006,7 +1056,8 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
           ctx.stroke();
 
           const c = visibleCandles[i];
-          const timeStr = new Date(c.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          const stamp = c.time > 10000000000 ? c.time : c.time * 1000;
+          const timeStr = new Date(stamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
           ctx.fillStyle = isDark ? "rgba(148, 163, 184, 0.5)" : "rgba(71, 85, 105, 0.75)";
           ctx.font = "9px JetBrains Mono, monospace";
           ctx.textAlign = "center";
@@ -1347,8 +1398,9 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       const timerPillY = pillY + pillHeight / 2 + 11;
 
       if (timerPillY + timerPillHeight / 2 < chartHeight + 20) {
-        ctx.fillStyle = isDark ? "#121824" : "#F1F5F9";
-        ctx.strokeStyle = isDark ? "rgba(245, 158, 11, 0.7)" : "rgba(217, 119, 6, 0.7)";
+        const isAppOnline = isOnlineRef.current;
+        ctx.fillStyle = !isAppOnline ? (isDark ? "rgba(239, 68, 68, 0.2)" : "#FEE2E2") : isDark ? "#121824" : "#F1F5F9";
+        ctx.strokeStyle = !isAppOnline ? "#EF4444" : isDark ? "rgba(245, 158, 11, 0.7)" : "rgba(217, 119, 6, 0.7)";
         ctx.lineWidth = 1;
         ctx.beginPath();
         if (ctx.roundRect) {
@@ -1359,18 +1411,20 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         ctx.fill();
         ctx.stroke();
 
-        // Exact 60 FPS Clock-synchronized live countdown string (0 lag)
-        const nowStamp = Date.now();
-        const nowSec = Math.floor(nowStamp / 1000);
-        const elapsed = nowSec % timeframeSec;
-        const remaining = Math.max(1, timeframeSec - elapsed);
-        const mins = Math.floor(remaining / 60);
-        const secs = remaining % 60;
-        const liveTimerString = `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+        let liveTimerString = "OFFLINE";
+        if (isAppOnline) {
+          const nowStamp = Date.now();
+          const nowSec = Math.floor(nowStamp / 1000);
+          const elapsed = nowSec % timeframeSec;
+          const remaining = Math.max(1, timeframeSec - elapsed);
+          const mins = Math.floor(remaining / 60);
+          const secs = remaining % 60;
+          liveTimerString = `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+        }
         candleCountdownRef.current = liveTimerString;
 
-        ctx.fillStyle = isDark ? "#FBBF24" : "#B45309";
-        ctx.font = "bold 9.5px JetBrains Mono, monospace";
+        ctx.fillStyle = !isAppOnline ? "#EF4444" : isDark ? "#FBBF24" : "#B45309";
+        ctx.font = "bold 9px JetBrains Mono, monospace";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(liveTimerString, timerPillX + timerPillWidth / 2, timerPillY);

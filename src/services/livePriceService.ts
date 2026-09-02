@@ -1840,14 +1840,21 @@ class LivePriceManager {
 
     // 1. Check if freshly cached in memory with non-default value
     const snap = this.getSnapshot(cleanSym);
-    if (snap && snap.price > 0 && snap.lastUpdateAgeMs < 2000 && snap.price !== 100.0) {
+    if (snap && snap.price > 0 && snap.lastUpdateAgeMs < 4000 && snap.price !== 100.0) {
       return snap.price;
     }
 
-    // Check memory price map direct variants
+    // Check memory price map direct variants (Deriv / Binance authoritative ticks)
     const directPrice = this.getPrice(cleanSym);
     if (directPrice && directPrice > 0 && directPrice !== 100.0) {
       return directPrice;
+    }
+
+    const derivMemory = this.rawExternalPrices[raw] || this.getPrice(raw);
+    if (derivMemory && derivMemory > 0 && derivMemory !== 100.0) {
+      this.setPrice(cleanSym, derivMemory, true, "Deriv Official Feed", 15);
+      this.setPrice(raw, derivMemory, true, "Deriv Official Feed", 15);
+      return derivMemory;
     }
 
     // 2. Metals Specific Handling (Silver / XAG, Gold / XAU, Platinum / XPT)
