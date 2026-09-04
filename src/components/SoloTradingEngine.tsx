@@ -60,8 +60,13 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
   onTriggerNotification,
   onUpdateProfile
 }) => {
-  // Single Unified Balance from currentUser (Firestore single source of truth)
-  const availableBalance = currentUser ? (currentUser.availableBalance ?? currentUser.balance ?? 0) : 0;
+  // In-flight reserved stakes to guarantee rapid back-to-back trades accurately know remaining balance
+  const [pendingReservedStake, setPendingReservedStake] = useState<number>(0);
+
+  // Single Unified Balance from currentUser (Firestore single source of truth minus active in-flight reservations)
+  const rawAvailableBalance = currentUser ? Math.max(0, currentUser.availableBalance ?? currentUser.balance ?? 0) : 0;
+  const effectiveAvailableBalance = Math.max(0, rawAvailableBalance - pendingReservedStake);
+  const availableBalance = effectiveAvailableBalance;
 
   // Track internet connectivity status
   const [isOnline, setIsOnline] = useState<boolean>(() => typeof navigator !== "undefined" ? navigator.onLine : true);
@@ -88,9 +93,19 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
     };
   }, [onTriggerNotification]);
   // Active Assets List (Admin Configured or Default)
-  const activeAssets = (soloConfig.customAssets && soloConfig.customAssets.length > 0)
-    ? soloConfig.customAssets
-    : SUPPORTED_SOLO_ASSETS;
+  const activeAssets = useMemo(() => {
+    const assetMap = new Map<string, MarketAsset>();
+    SUPPORTED_SOLO_ASSETS.forEach((a) => assetMap.set(a.symbol, a));
+    if (soloConfig.customAssets && Array.isArray(soloConfig.customAssets)) {
+      soloConfig.customAssets.forEach((a) => {
+        if (a && a.symbol) {
+          const existing = assetMap.get(a.symbol);
+          assetMap.set(a.symbol, existing ? { ...existing, ...a } : a);
+        }
+      });
+    }
+    return Array.from(assetMap.values()).filter((a) => !a.disabled);
+  }, [soloConfig.customAssets]);
 
   // Selected Trading Asset
   const [selectedAsset, setSelectedAsset] = useState<MarketAsset>(activeAssets[0] || SUPPORTED_SOLO_ASSETS[0]);
@@ -261,10 +276,16 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
     }
   };
 
-  // Subscribe to live price ticks
+  // Subscribe to live price ticks with throttling
   useEffect(() => {
+    let lastSetTime = 0;
     const unsubscribe = livePriceService.subscribe((prices) => {
-      setLivePrices(prices);
+      const now = Date.now();
+      // Throttle state update in parent SoloTradingEngine to 100ms to preserve UI responsiveness
+      if (now - lastSetTime >= 100) {
+        lastSetTime = now;
+        setLivePrices(prices);
+      }
       const current = prices[selectedAsset.symbol];
       if (current && prevPriceRef.current !== null) {
         if (current > prevPriceRef.current) {
@@ -339,13 +360,15 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
     return () => unsubscribe();
   }, [currentUser]);
 
-  // Real-time interval for timer countdowns (100ms tick for ultra-smooth 60fps progress bar & seconds rendering)
+  // Real-time interval for timer countdowns (active only when running trades exist)
+  const hasRunningTrades = userTrades.some((t) => t.status === "RUNNING");
   useEffect(() => {
+    if (!hasRunningTrades) return;
     const timer = setInterval(() => {
       setNowTimestamp(Date.now());
-    }, 100);
+    }, 250);
     return () => clearInterval(timer);
-  }, []);
+  }, [hasRunningTrades]);
 
   // Auto-settle running trades INSTANTLY when countdown reaches 0s (0ms UI latency for live online feeds; waits for server authoritative settler if offline)
   useEffect(() => {
@@ -584,12 +607,32 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
     }
 
     if (parsedStake > availableBalance) {
-      setOrderError(`Insufficient Available Balance (₹${availableBalance.toFixed(2)}).`);
+      setOrderError(`Insufficient Available Balance (₹${availableBalance.toFixed(2)}). Cannot place trade.`);
+      if (onTriggerNotification) {
+        onTriggerNotification(`⚠️ Insufficient Available Balance (₹${availableBalance.toFixed(2)}). Cannot place trade.`, "error");
+      }
       return;
     }
 
+    // Lock fast submission buttons during click to prevent duplicate click bounce
+    setIsSubmitting(true);
+    setFastSubmittingType(targetType);
+
+    // Reserve stake locally so rapid sequential clicks immediately see the reduced balance
+    setPendingReservedStake(prev => prev + parsedStake);
+
     // Play instant sound feedback
     playTradeExecutionSound(targetType);
+
+    // Optimistically update live profile balance across header badge, quick trade pill, etc.
+    if (currentUser && onUpdateProfile) {
+      const nextAvail = Math.max(0, rawAvailableBalance - parsedStake);
+      onUpdateProfile({
+        ...currentUser,
+        availableBalance: nextAvail,
+        balance: Math.max(0, (currentUser.balance ?? rawAvailableBalance) - parsedStake)
+      });
+    }
 
     // Use atomic price snapshot to guarantee execution price matches displayed price and provider feed 100%
     const priceSnap = livePriceService.getSnapshot(currentAsset.symbol);
@@ -634,7 +677,7 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
       );
     }
 
-    // Fire trade placement asynchronously to ensure zero UI delay (balance is atomically updated by Firestore)
+    // Fire atomic trade placement to Firestore (enforced via runTransaction)
     placeSoloTrade(
       currentUser.id,
       targetType,
@@ -648,13 +691,33 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
       endTimeISO,
       selectedDrawRule
     ).then((realTradeId) => {
+      setPendingReservedStake(prev => Math.max(0, prev - parsedStake));
       if (realTradeId) {
         setUserTrades(prev => prev.map(t => t.id === tempId ? { ...t, id: realTradeId, txId: "tx_" + realTradeId } : t));
       }
     }).catch((err: any) => {
       console.error("[Instant Trade Execution Error]:", err);
-      setOrderError(sanitizeErrorMessage(err, "Failed to execute solo trade."));
+      setPendingReservedStake(prev => Math.max(0, prev - parsedStake));
+      const sanitized = sanitizeErrorMessage(err, "Failed to execute solo trade.");
+      setOrderError(sanitized);
+      if (onTriggerNotification) {
+        onTriggerNotification(sanitized, "error");
+      }
       setUserTrades(prev => prev.filter(t => t.id !== tempId));
+
+      // Revert optimistic profile balance if trade placement was rejected
+      if (currentUser && onUpdateProfile) {
+        onUpdateProfile({
+          ...currentUser,
+          availableBalance: rawAvailableBalance,
+          balance: currentUser.balance ?? rawAvailableBalance
+        });
+      }
+    }).finally(() => {
+      setIsSubmitting(false);
+      setTimeout(() => {
+        setFastSubmittingType(null);
+      }, 350);
     });
   };
 
@@ -846,9 +909,14 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
                 {Array.from(
                   new Set([
                     "ALL",
-                    ...(soloConfig.categories && soloConfig.categories.length > 0
+                    "Crypto",
+                    "Forex",
+                    "Metals",
+                    "Commodities",
+                    "Indices",
+                    ...(soloConfig.categories && Array.isArray(soloConfig.categories)
                       ? soloConfig.categories
-                      : ["Crypto", "Forex", "Commodities", "Metals", "Indices"])
+                      : [])
                   ])
                 ).map((cat) => (
                   <button
@@ -1116,7 +1184,7 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
                   {/* Live Wallet Balance Display */}
                   <div className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-600 dark:text-emerald-400 font-mono font-black text-xs shadow-xs">
                     <Coins className="h-3.5 w-3.5 text-emerald-500 dark:text-emerald-400" />
-                    <span>Bal: ₹{(currentUser ? availableBalance : 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    <span>Bal: ₹{Math.max(0, currentUser ? availableBalance : 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
                 </div>
 
@@ -1415,7 +1483,7 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
 
                   {currentUser && (
                     <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
-                      Bal: <strong className="text-emerald-600 dark:text-emerald-400 font-extrabold">₹{availableBalance.toFixed(2)}</strong>
+                      Bal: <strong className="text-emerald-600 dark:text-emerald-400 font-extrabold">₹{Math.max(0, availableBalance).toFixed(2)}</strong>
                     </span>
                   )}
                 </div>

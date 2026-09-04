@@ -989,7 +989,7 @@ export default function App() {
                 >
                   <User className="h-3.5 w-3.5 text-indigo-500 shrink-0 group-hover:scale-110 transition-transform" />
                   <span className="font-bold text-slate-800 dark:text-slate-200">{currentUserProfile.name}</span>
-                  <span className="text-slate-400 font-mono font-normal">(₹{(currentUserProfile.availableBalance ?? currentUserProfile.balance ?? 0).toFixed(0)})</span>
+                  <span className="text-slate-400 font-mono font-normal">(₹{Math.max(0, currentUserProfile.availableBalance ?? currentUserProfile.balance ?? 0).toFixed(0)})</span>
                   <span className="p-0.5 bg-indigo-100 dark:bg-indigo-950/80 text-indigo-600 dark:text-indigo-400 rounded text-[9px] font-bold uppercase ml-0.5">
                     Edit
                   </span>

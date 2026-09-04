@@ -150,6 +150,12 @@ export function detectCandlePattern(
   return {};
 }
 
+// Global Permanent Session Cache: Stores full candle history & closed candles per pair & timeframe.
+// When a user switches back and forth between pairs, their closed candles, exact wicks, and shapes
+// are NEVER wiped or altered by delayed exchange history responses.
+const globalSessionCandleHistory = new Map<string, Candle[]>();
+const globalSessionClosedCandles = new Map<string, Map<number, Candle>>();
+
 interface QuotexProChartProps {
   currentSymbol: string;
   currentPairName: string;
@@ -291,6 +297,17 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       last.pattern = pat.pattern;
       last.signal = pat.signal;
 
+      // PERMANENT SESSION LOCK:
+      // Once a live candle closes on screen, freeze its exact Open, High, Low, Close and Wicks
+      // so switching pairs or fetching history never alters or compresses its wicks.
+      const symCacheKey = `${currentSymbol}_${timeframeSec}`;
+      let lockedMap = globalSessionClosedCandles.get(symCacheKey);
+      if (!lockedMap) {
+        lockedMap = new Map<number, Candle>();
+        globalSessionClosedCandles.set(symCacheKey, lockedMap);
+      }
+      lockedMap.set(last.time, { ...last });
+
       if (currentCandlePeriodSec - last.time <= timeframeSec) {
         // Standard single candle rollover
         const openP = last.close > 0 ? last.close : currentPrice;
@@ -370,12 +387,18 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     height: 400
   });
 
-  // Track container width for responsive indicator sub-panels
+  const canvasSizeRef = useRef<{ width: number; height: number }>({ width: 800, height: 400 });
+
+  // Track container width and height for responsive indicator sub-panels and high-performance canvas sizing
   useEffect(() => {
     if (!containerRef.current) return;
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        if (entry.contentRect.width > 0) {
+        if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
+          canvasSizeRef.current = {
+            width: entry.contentRect.width,
+            height: entry.contentRect.height
+          };
           setCanvasWidth(entry.contentRect.width);
         }
       }
@@ -399,6 +422,21 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       );
     });
   }, [activeTrades, currentSymbol, currentPairName]);
+
+  const matchingActiveTradesRef = useRef(matchingActiveTrades);
+  useEffect(() => {
+    matchingActiveTradesRef.current = matchingActiveTrades;
+  }, [matchingActiveTrades]);
+
+  const drawingsRef = useRef(drawings);
+  useEffect(() => {
+    drawingsRef.current = drawings;
+  }, [drawings]);
+
+  const selectedDrawingIdRef = useRef(selectedDrawingId);
+  useEffect(() => {
+    selectedDrawingIdRef.current = selectedDrawingId;
+  }, [selectedDrawingId]);
 
   // Load symbol and timeframe specific drawings on change (active indicators remain intact across all pairs/timeframes)
   useEffect(() => {
@@ -556,6 +594,11 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     }));
   }, [indicators, candlesVersion, currentSymbol, timeframeSec, livePrice]);
 
+  const overlayIndicatorsResultsRef = useRef(overlayIndicatorsResults);
+  useEffect(() => {
+    overlayIndicatorsResultsRef.current = overlayIndicatorsResults;
+  }, [overlayIndicatorsResults]);
+
   // Sub-panel indicators
   const subPanelIndicators = useMemo(() => {
     return indicators.filter((ind) => ind.visible && !ind.isOverlay);
@@ -583,16 +626,20 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     const liveServiceCached = livePriceService.getCachedCandles(currentSymbol, timeframeSec);
 
     let hasImmediateCandles = false;
-    if (candleHistoryCacheRef.current.has(cacheKey)) {
-      const cached = candleHistoryCacheRef.current.get(cacheKey)!;
-      const firstValidClose = cached.length > 0 ? cached[cached.length - 1].close : 0;
+    // 1. Check Global Session Candle History first (survives all pair switches)
+    const sessionHistory = globalSessionCandleHistory.get(cacheKey);
+    const localComponentHistory = candleHistoryCacheRef.current.get(cacheKey);
+    const immediateList = (sessionHistory && sessionHistory.length > 0) ? sessionHistory : localComponentHistory;
+
+    if (immediateList && immediateList.length > 0) {
+      const firstValidClose = immediateList[immediateList.length - 1].close;
       const isCachePriceValid = initialPrice <= 0 || (firstValidClose > 0 && Math.abs(firstValidClose - initialPrice) / initialPrice < 0.25);
 
-      if (cached.length > 0 && isCachePriceValid) {
-        candlesRef.current = [...cached];
+      if (isCachePriceValid) {
+        candlesRef.current = [...immediateList];
         setCandlesVersion((v) => v + 1);
         hasImmediateCandles = true;
-        const last = cached[cached.length - 1];
+        const last = immediateList[immediateList.length - 1];
         const activeLive = livePriceService.getPrice(currentSymbol);
         if (activeLive && activeLive > 0) {
           lastValidPricesBySymbolRef.current.set(currentSymbol, activeLive);
@@ -607,6 +654,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         }
       } else {
         candleHistoryCacheRef.current.delete(cacheKey);
+        globalSessionCandleHistory.delete(cacheKey);
       }
     } else if (liveServiceCached && liveServiceCached.length > 0) {
       const formatted = liveServiceCached.map((c: any) => {
@@ -735,16 +783,110 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
               }
             }
 
-            const currentActiveCandle = formatted[formatted.length - 1];
+            const initialActiveCandle = formatted[formatted.length - 1];
+            const initialFinalPrice = initialActiveCandle ? initialActiveCandle.close : (activeLive || 100.0);
+
+            lastValidPricesBySymbolRef.current.set(currentSymbol, initialFinalPrice);
+            renderPriceRef.current = initialFinalPrice;
+            targetPriceRef.current = initialFinalPrice;
+            setLivePrice(initialFinalPrice);
+
+            // BINOMO / QUOTEX STYLE MERGE ENGINE:
+            // Never wipe or violently replace the live forming candle that the user is watching.
+            const existing = candlesRef.current;
+            if (existing.length > 0) {
+              const existingLast = existing[existing.length - 1];
+              const existingLastTime = existingLast ? existingLast.time : 0;
+
+              // Reconcile and backfill completed past candles from exchange history
+              const reconciled: Candle[] = [];
+              const pastHistoryMap = new Map<number, Candle>();
+              for (const c of formatted) {
+                pastHistoryMap.set(c.time, c);
+              }
+
+              const lockedCandles = globalSessionClosedCandles.get(cacheKey);
+
+              // Keep all past history candles that are strictly older than current active forming candle
+              for (const histCandle of formatted) {
+                if (histCandle.time < existingLastTime) {
+                  // If this candle was formed and locked during the user's live session, use the locked candle with its exact wicks!
+                  const locked = lockedCandles?.get(histCandle.time);
+                  reconciled.push(locked ? { ...locked } : histCandle);
+                }
+              }
+
+              // Preserve all currently existing live candles (including active forming candle)
+              for (const ex of existing) {
+                const locked = lockedCandles?.get(ex.time);
+                if (locked) {
+                  // This candle closed live in front of the user - restore its exact wicks and OHLC!
+                  ex.open = locked.open;
+                  ex.high = locked.high;
+                  ex.low = locked.low;
+                  ex.close = locked.close;
+                  if (!reconciled.some((r) => r.time === ex.time)) {
+                    reconciled.push(ex);
+                  }
+                } else if (ex.time < existingLastTime) {
+                  // If history provided official closed OHLC for past candles, align high/low wicks
+                  const histMatch = pastHistoryMap.get(ex.time);
+                  if (histMatch) {
+                    ex.open = histMatch.open;
+                    ex.high = Math.max(ex.high, histMatch.high);
+                    ex.low = Math.min(ex.low, histMatch.low);
+                    ex.close = histMatch.close;
+                  }
+                  if (!reconciled.some((r) => r.time === ex.time)) {
+                    reconciled.push(ex);
+                  }
+                } else if (ex.time === existingLastTime) {
+                  // ACTIVE FORMING CANDLE: Keep the live tick price and real-time wicks completely intact!
+                  const histMatch = pastHistoryMap.get(ex.time);
+                  if (histMatch) {
+                    ex.open = histMatch.open;
+                    ex.high = Math.max(ex.high, histMatch.high);
+                    ex.low = Math.min(ex.low, histMatch.low);
+                  }
+                  if (activeLive && activeLive > 0) {
+                    ex.close = activeLive;
+                    ex.high = Math.max(ex.high, activeLive);
+                    ex.low = Math.min(ex.low, activeLive);
+                  }
+                  reconciled.push(ex);
+                } else {
+                  // Any newer forward candles created by active tick engine
+                  reconciled.push(ex);
+                }
+              }
+
+              // Sort chronologically and deduplicate
+              reconciled.sort((a, b) => a.time - b.time);
+              const uniqueReconciled: Candle[] = [];
+              for (let k = 0; k < reconciled.length; k++) {
+                if (k === 0 || reconciled[k].time !== reconciled[k - 1].time) {
+                  uniqueReconciled.push(reconciled[k]);
+                }
+              }
+
+              while (uniqueReconciled.length > 300) uniqueReconciled.shift();
+              candlesRef.current = uniqueReconciled;
+              candleHistoryCacheRef.current.set(cacheKey, uniqueReconciled);
+              globalSessionCandleHistory.set(cacheKey, uniqueReconciled);
+            } else {
+              // Initial cold load when chart was empty
+              candlesRef.current = formatted;
+              candleHistoryCacheRef.current.set(cacheKey, formatted);
+              globalSessionCandleHistory.set(cacheKey, formatted);
+            }
+
+            const currentActiveCandle = candlesRef.current[candlesRef.current.length - 1];
             const finalPrice = currentActiveCandle ? currentActiveCandle.close : (activeLive || 100.0);
 
             lastValidPricesBySymbolRef.current.set(currentSymbol, finalPrice);
             renderPriceRef.current = finalPrice;
             targetPriceRef.current = finalPrice;
             setLivePrice(finalPrice);
-
-            candlesRef.current = formatted;
-            candleHistoryCacheRef.current.set(cacheKey, formatted);
             setCandlesVersion((v) => v + 1);
           }
         }
@@ -775,17 +917,29 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         if (existing.length === 0) return;
         const existingLastTime = existing[existing.length - 1]?.time || 0;
 
+        const cacheKey = `${currentSymbol}_${timeframeSec}`;
+        const lockedCandles = globalSessionClosedCandles.get(cacheKey);
+
         // Reconcile completed past candles and active forming candle with official exchange OHLC
         raw.forEach((c) => {
           const rawTime = Number(c.time);
           const timeSec = rawTime > 10000000000 ? Math.floor(rawTime / 1000) : rawTime;
           const match = existing.find((ex) => ex.time === timeSec);
           if (match) {
-            match.open = Number(c.open);
-            match.high = Math.max(match.high, Number(c.high));
-            match.low = Math.min(match.low, Number(c.low));
-            if (timeSec < existingLastTime) {
-              match.close = Number(c.close);
+            const locked = lockedCandles?.get(timeSec);
+            if (locked) {
+              // NEVER overwrite user's locked closed wicks!
+              match.open = locked.open;
+              match.high = locked.high;
+              match.low = locked.low;
+              match.close = locked.close;
+            } else {
+              match.open = Number(c.open);
+              match.high = Math.max(match.high, Number(c.high));
+              match.low = Math.min(match.low, Number(c.low));
+              if (timeSec < existingLastTime) {
+                match.close = Number(c.close);
+              }
             }
           }
         });
@@ -908,17 +1062,24 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
     const renderChart = () => {
       const dpr = window.devicePixelRatio || 1;
-      const rect = canvas.getBoundingClientRect();
-      if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
-        canvas.width = rect.width * dpr;
-        canvas.height = rect.height * dpr;
+      let width = canvasSizeRef.current.width;
+      let height = canvasSizeRef.current.height;
+      if (width <= 0 || height <= 0) {
+        const rect = canvas.getBoundingClientRect();
+        width = rect.width || 800;
+        height = rect.height || 400;
+        canvasSizeRef.current = { width, height };
+      }
+      const targetW = Math.round(width * dpr);
+      const targetH = Math.round(height * dpr);
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
       }
 
       ctx.save();
       ctx.scale(dpr, dpr);
 
-      const width = rect.width;
-      const height = rect.height;
       const paddingRight = 78;
       const paddingBottom = 26;
       const chartWidth = width - paddingRight;
@@ -1001,7 +1162,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       if (!isFinite(maxP) || maxP <= 0 || maxP === -Infinity) maxP = activeDrawPrice * 1.001;
 
       // Matching active trades
-      matchingActiveTrades.forEach((t) => {
+      matchingActiveTradesRef.current.forEach((t) => {
         if (isFinite(t.entryPrice) && t.entryPrice > 0 && Math.abs(t.entryPrice - activeDrawPrice) / activeDrawPrice < 0.15) {
           if (t.entryPrice < minP) minP = t.entryPrice;
           if (t.entryPrice > maxP) maxP = t.entryPrice;
@@ -1107,7 +1268,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       }
 
       // 3. Technical Overlay Indicators (EMA, SMA, VWAP, Supertrend, Bollinger Bands)
-      overlayIndicatorsResults.forEach(({ config, result }) => {
+      overlayIndicatorsResultsRef.current.forEach(({ config, result }) => {
         if (!result.values) return;
 
         if (config.type === "BollingerBands") {
@@ -1330,8 +1491,8 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       }
 
       // 5. Render Drawing Objects
-      drawings.forEach((drawing) => {
-        const isSelected = drawing.id === selectedDrawingId;
+      drawingsRef.current.forEach((drawing) => {
+        const isSelected = drawing.id === selectedDrawingIdRef.current;
         renderDrawing(ctx, drawing, transformRef.current, isSelected);
       });
 
@@ -1341,12 +1502,13 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       }
 
       // 6. Active Trades Overlay
-      if (showActiveTrades && matchingActiveTrades.length > 0) {
-        matchingActiveTrades.forEach((trade) => {
+      const currentTrades = matchingActiveTradesRef.current;
+      if (showActiveTrades && currentTrades.length > 0) {
+        currentTrades.forEach((trade) => {
           const entryY = getY(trade.entryPrice);
           const isWin =
-            (trade.tradeType === "CALL" && livePrice > trade.entryPrice) ||
-            (trade.tradeType === "PUT" && livePrice < trade.entryPrice);
+            (trade.tradeType === "CALL" && activeDrawPrice > trade.entryPrice) ||
+            (trade.tradeType === "PUT" && activeDrawPrice < trade.entryPrice);
 
           ctx.strokeStyle = trade.tradeType === "CALL" ? quotexGreen : quotexRed;
           ctx.setLineDash([4, 4]);
@@ -1507,8 +1669,6 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     animId = requestAnimationFrame(renderChart);
     return () => cancelAnimationFrame(animId);
   }, [
-    livePrice,
-    prevPrice,
     visibleCandlesCount,
     panOffset,
     showGrid,
@@ -1516,10 +1676,6 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     showPatternLabels,
     showActiveTrades,
     chartType,
-    matchingActiveTrades,
-    overlayIndicatorsResults,
-    drawings,
-    selectedDrawingId,
     currentSymbol,
     decimals,
     timeframeSec

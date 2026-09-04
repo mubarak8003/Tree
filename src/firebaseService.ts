@@ -2441,16 +2441,30 @@ export function subscribeAppPaymentSettings(callback: (settings: CombinedPayment
 
 export function normalizeUserProfile(data: any): UserProfile {
   if (!data) return data;
-  const unifiedBal = typeof data.availableBalance === "number"
+  const rawAvail = typeof data.availableBalance === "number"
     ? data.availableBalance
     : (typeof data.balance === "number" ? data.balance : 0);
-  const locked = typeof data.lockedBalance === "number" ? data.lockedBalance : 0;
+  const safeAvail = Math.max(0, rawAvail);
+  const rawBal = typeof data.balance === "number" ? data.balance : safeAvail;
+  const safeBal = Math.max(0, rawBal);
+  const locked = typeof data.lockedBalance === "number" ? Math.max(0, data.lockedBalance) : 0;
+
+  // Auto-heal negative balances in Firestore in the background if encountered
+  if (data.id && (rawAvail < 0 || rawBal < 0)) {
+    try {
+      updateDoc(doc(db, "users", data.id), {
+        availableBalance: safeAvail,
+        balance: safeBal
+      }).catch(() => {});
+    } catch {}
+  }
+
   return {
     ...data,
     name: data.name || "Trader",
     email: data.email || "",
-    balance: unifiedBal,
-    availableBalance: unifiedBal,
+    balance: safeBal,
+    availableBalance: safeAvail,
     lockedBalance: locked,
   };
 }
@@ -3155,7 +3169,7 @@ export async function adminApproveMobileVerificationDirectly(userId: string): Pr
 
 // --- SOLO TRADING ENGINE FIREBASE SERVICES ---
 
-import { SUPPORTED_SOLO_ASSETS, livePriceService, formatAssetPrice } from "./services/livePriceService";
+import { SUPPORTED_SOLO_ASSETS, livePriceService, formatAssetPrice, MarketAsset } from "./services/livePriceService";
 
 export const DEFAULT_SOLO_CATEGORIES = ["Crypto", "Forex", "Commodities", "Metals", "Indices"];
 
@@ -3182,7 +3196,35 @@ export function subscribeSoloTradingConfig(callback: (config: SoloTradingConfig)
     configRef,
     (snap) => {
       if (snap.exists()) {
-        callback({ ...DEFAULT_SOLO_TRADING_CONFIG, ...snap.data() } as SoloTradingConfig);
+        const data = snap.data() as Partial<SoloTradingConfig>;
+
+        // Merge assets so default pairs across Crypto, Forex, Metals, Commodities, and Indices are never lost
+        const assetMap = new Map<string, MarketAsset>();
+        SUPPORTED_SOLO_ASSETS.forEach((a) => assetMap.set(a.symbol, a));
+        if (Array.isArray(data.customAssets)) {
+          data.customAssets.forEach((a) => {
+            if (a && a.symbol) {
+              const existing = assetMap.get(a.symbol);
+              assetMap.set(a.symbol, existing ? { ...existing, ...a } : a);
+            }
+          });
+        }
+        const mergedAssets = Array.from(assetMap.values());
+
+        // Merge categories to ensure all default tabs are always present
+        const mergedCategories = Array.from(
+          new Set([
+            ...DEFAULT_SOLO_CATEGORIES,
+            ...(Array.isArray(data.categories) ? data.categories : [])
+          ])
+        );
+
+        callback({
+          ...DEFAULT_SOLO_TRADING_CONFIG,
+          ...data,
+          customAssets: mergedAssets,
+          categories: mergedCategories
+        } as SoloTradingConfig);
       } else {
         callback(DEFAULT_SOLO_TRADING_CONFIG);
       }
@@ -3291,81 +3333,87 @@ export async function placeSoloTrade(
   console.log(`[Firestore Write / Trade Placement] Creating ${tradeType} trade for ${userId} on ${assetPair} (${tradingSymbol}), stake=₹${stake}, duration=${durationSeconds}s, entryPrice=${entryPrice}`);
 
   try {
-    const userSnap = await getDoc(userRef);
-    if (!userSnap.exists()) {
-      throw new Error("User profile not found");
-    }
-    const user = userSnap.data() as UserProfile;
+    let finalAvailBalance = 0;
 
-    if (!isUserMobileVerified(user)) {
-      throw new Error("Mobile Verification Required! Trading is locked until your mobile number is verified. Please verify in Profile Settings.");
-    }
+    await runTransaction(db, async (transaction) => {
+      const userSnap = await transaction.get(userRef);
+      if (!userSnap.exists()) {
+        throw new Error("User profile not found");
+      }
+      const user = userSnap.data() as UserProfile;
 
-    const currAvail = user.availableBalance ?? user.balance ?? 0;
-    if (currAvail < stake) {
-      throw new Error(`Insufficient Available Balance! You have ₹${currAvail.toFixed(2)}, but tried to stake ₹${stake}.`);
-    }
+      if (!isUserMobileVerified(user)) {
+        throw new Error("Mobile Verification Required! Trading is locked until your mobile number is verified. Please verify in Profile Settings.");
+      }
 
-    const now = new Date();
-    const startTimeISO = clientStartTimeISO || now.toISOString();
-    const endTimeISO = clientEndTimeISO || new Date(now.getTime() + durationSeconds * 1000).toISOString();
+      const currAvail = typeof user.availableBalance === "number" ? user.availableBalance : (typeof user.balance === "number" ? user.balance : 0);
+      if (currAvail < stake) {
+        throw new Error(`Insufficient Available Balance! You have ₹${Math.max(0, currAvail).toFixed(2)}, but tried to stake ₹${stake}.`);
+      }
 
-    let payoutPct = customPayoutPercentage && customPayoutPercentage > 0 ? customPayoutPercentage : 85;
-    const expectedPayout = stake + (stake * payoutPct) / 100;
+      const now = new Date();
+      const startTimeISO = clientStartTimeISO || now.toISOString();
+      const endTimeISO = clientEndTimeISO || new Date(now.getTime() + durationSeconds * 1000).toISOString();
 
-    const newSoloTrade: SoloTrade = {
-      id: tradeId,
-      userId: user.id,
-      userEmail: user.email,
-      userName: user.name || user.email.split("@")[0],
-      tradeType,
-      stake,
-      entryPrice,
-      exitPrice: null,
-      payoutPercentage: payoutPct,
-      expectedPayout,
-      profitOrLoss: null,
-      startTime: startTimeISO,
-      endTime: endTimeISO,
-      durationSeconds,
-      status: "RUNNING",
-      assetPair,
-      tradingSymbol,
-      drawRule: activeDrawRule,
-      txId: walletTxId
-    };
+      let payoutPct = customPayoutPercentage && customPayoutPercentage > 0 ? customPayoutPercentage : 85;
+      const expectedPayout = stake + (stake * payoutPct) / 100;
 
-    const walletTx: WalletTransaction = {
-      id: walletTxId,
-      userId: user.id,
-      userEmail: user.email,
-      userName: user.name || user.email.split("@")[0],
-      type: "TRADE_INVEST",
-      amount: stake,
-      status: "APPROVED",
-      createdAt: startTimeISO,
-      balanceBefore: currAvail,
-      balanceAfter: Math.max(0, currAvail - stake),
-      referenceId: tradeId,
-      txDetails: `Solo Option (${tradeType}): ${assetPair} @ ${formatAssetPrice(entryPrice, assetPair)}`
-    };
+      const newSoloTrade: SoloTrade = {
+        id: tradeId,
+        userId: user.id,
+        userEmail: user.email,
+        userName: user.name || user.email.split("@")[0],
+        tradeType,
+        stake,
+        entryPrice,
+        exitPrice: null,
+        payoutPercentage: payoutPct,
+        expectedPayout,
+        profitOrLoss: null,
+        startTime: startTimeISO,
+        endTime: endTimeISO,
+        durationSeconds,
+        status: "RUNNING",
+        assetPair,
+        tradingSymbol,
+        drawRule: activeDrawRule,
+        txId: walletTxId
+      };
 
-    // Atomic non-blocking writes via increment to avoid transaction contention
-    await Promise.all([
-      setDoc(tradeRef, newSoloTrade),
-      setDoc(walletTxRef, walletTx),
-      updateDoc(userRef, {
-        availableBalance: increment(-stake),
-        balance: increment(-stake)
-      })
-    ]);
+      const newAvail = Math.max(0, currAvail - stake);
+      const currTotal = typeof user.balance === "number" ? user.balance : currAvail;
+      const newTotal = Math.max(0, currTotal - stake);
+      finalAvailBalance = newAvail;
 
-    const newAvail = Math.max(0, currAvail - stake);
-    autoRejectInsufficientWithdrawals(user.id, newAvail).catch((e) => {
+      const walletTx: WalletTransaction = {
+        id: walletTxId,
+        userId: user.id,
+        userEmail: user.email,
+        userName: user.name || user.email.split("@")[0],
+        type: "TRADE_INVEST",
+        amount: stake,
+        status: "APPROVED",
+        createdAt: startTimeISO,
+        balanceBefore: currAvail,
+        balanceAfter: newAvail,
+        referenceId: tradeId,
+        txDetails: `Solo Option (${tradeType}): ${assetPair} @ ${formatAssetPrice(entryPrice, assetPair)}`
+      };
+
+      // Atomic execution: balance cannot go negative under concurrent back-to-back trades
+      transaction.set(tradeRef, newSoloTrade);
+      transaction.set(walletTxRef, walletTx);
+      transaction.update(userRef, {
+        availableBalance: newAvail,
+        balance: newTotal
+      });
+    });
+
+    autoRejectInsufficientWithdrawals(userId, finalAvailBalance).catch((e) => {
       console.warn("Auto reject check error:", e);
     });
 
-    console.log(`[Trade Transition] CREATED -> RUNNING: Trade ID ${tradeId} created.`);
+    console.log(`[Trade Transition] CREATED -> RUNNING: Trade ID ${tradeId} created with remaining balance ₹${finalAvailBalance}.`);
     return tradeId;
   } catch (err: any) {
     console.error(`[Firestore Write Error / Trade Placement Failed] Trade ${tradeId}:`, err);
@@ -3398,7 +3446,7 @@ export async function placeSoloTrade(
         }
       } catch {}
 
-      const avail = localUser ? (localUser.availableBalance ?? localUser.balance ?? 0) : 999999;
+      const avail = localUser ? Math.max(0, localUser.availableBalance ?? localUser.balance ?? 0) : 0;
       if (avail < stake) {
         throw new Error(`Insufficient Available Balance! You have ₹${avail.toFixed(2)}, but tried to stake ₹${stake}.`);
       }
@@ -3607,10 +3655,16 @@ export async function settleSoloTrade(
 
       // 2. Atomically update user balance ONLY IF finalPayout > 0
       if (finalPayout > 0) {
-        transaction.update(userRef, {
-          availableBalance: increment(finalPayout),
-          balance: increment(finalPayout)
-        });
+        const uSnap = await transaction.get(userRef);
+        if (uSnap.exists()) {
+          const u = uSnap.data() as UserProfile;
+          const currAvail = Math.max(0, u.availableBalance ?? u.balance ?? 0);
+          const currBal = Math.max(0, u.balance ?? currAvail);
+          transaction.update(userRef, {
+            availableBalance: currAvail + finalPayout,
+            balance: currBal + finalPayout
+          });
+        }
 
         const settleTxId = "tx_solo_set_" + Date.now() + "_" + Math.floor(Math.random() * 100000);
         const settleTxRef = doc(db, "wallet_transactions", settleTxId);

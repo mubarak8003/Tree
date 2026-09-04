@@ -568,6 +568,7 @@ class LivePriceManager {
   private microTickerId: any = null;
   private restSyncIntervalId: any = null;
   private freshnessCheckIntervalId: any = null;
+  private notifyPending: boolean = false;
   private totalUpdateCount = 0;
   private lastPriceUpdateTime = Date.now();
   private manualOverrides: Record<string, number> = {};
@@ -1392,8 +1393,8 @@ class LivePriceManager {
           } catch (_) {}
         }
 
-        // 2. High-Frequency Real Interbank Tick Stream Engine (Every 250ms)
-        // Solves the "stuck ticks" issue completely by querying real Deriv spot ticks over the persistent WS
+        // 2. Optimized Real Interbank Tick Stream Engine (Every 600ms)
+        // Streams the active chart symbol and smoothly cycles through background pairs without overloading the browser
         let bgCycleIdx = 0;
         this.derivTickStreamInterval = setInterval(() => {
           if (this.derivWs && this.derivWs.readyState === WebSocket.OPEN) {
@@ -1408,7 +1409,7 @@ class LivePriceManager {
                 }));
               }
 
-              // B. Round-robin cycle through all background pairs to keep quotes fresh across the board
+              // B. Round-robin cycle through background pairs calmly to keep quotes fresh across the board
               bgCycleIdx = (bgCycleIdx + 1) % derivTickSymbols.length;
               const bgSym = derivTickSymbols[bgCycleIdx];
               if (bgSym && bgSym !== this.activeChartDerivSymbol) {
@@ -1421,7 +1422,7 @@ class LivePriceManager {
               }
             } catch (_) {}
           }
-        }, 250);
+        }, 600);
 
         // High-precision 5-Second Ping & Deriv Official Server Time Sync Engine
         this.derivPingInterval = setInterval(() => {
@@ -1650,20 +1651,20 @@ class LivePriceManager {
       });
     }
 
-    // Rapid Network Watchdog / Health Probe (Detects internet disconnect in < 2 seconds)
+    // Network Watchdog / Health Probe (Checks connectivity if ticks are quiet for > 15 seconds)
     this.healthProbeIntervalId = setInterval(() => {
       const now = Date.now();
       const idleMs = now - this.lastRealInboundTickTime;
 
-      // If no inbound ticks received from Binance/Deriv for > 1500ms, probe network immediately
-      if (idleMs > 1500) {
+      // If no inbound ticks received from Binance/Deriv for > 15s, check network
+      if (idleMs > 15000) {
         if (typeof navigator !== "undefined" && !navigator.onLine) {
           this.setNetworkStatus(false);
           return;
         }
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 800);
+        const timeoutId = setTimeout(() => controller.abort(), 1200);
         fetch("/api/health", { method: "HEAD", signal: controller.signal, cache: "no-store" })
           .then((res) => {
             clearTimeout(timeoutId);
@@ -1673,45 +1674,37 @@ class LivePriceManager {
           })
           .catch(() => {
             clearTimeout(timeoutId);
-            // Instant network disconnect detected!
             this.setNetworkStatus(false);
           });
       }
-    }, 1000);
+    }, 10000);
 
     // NOTE: Synthetic Micro-Ticker is permanently disabled to ensure 100% authentic market data.
     // Real ticks from Binance WebSocket & Deriv WebSocket stream directly with 0 synthetic pollution.
     // Visual fluid motion is handled purely by the canvas 60 FPS interpolation renderer.
     this.microTickerId = null;
 
-    // High-frequency authentic REST sync poll: fetches real spot rates from ExchangeRate API & Yahoo Finance every 2.0s
+    // Periodic authentic REST sync poll (Fallback every 12s when WebSocket is active)
     this.restSyncIntervalId = setInterval(() => {
       if (typeof navigator !== "undefined" && !navigator.onLine) {
         return;
       }
       this.fetchAllLivePricesREST();
-    }, 2000);
+    }, 12000);
   }
 
-  // 3. Automated Staleness Monitor: Requests fresh price immediately if any asset is older than 5 seconds
+  // 3. Automated Staleness Monitor: Calmly verifies the active chart symbol and requests fresh quotes if quiet
   private startStalenessMonitor() {
     this.freshnessCheckIntervalId = setInterval(() => {
       const now = Date.now();
-      let needsRefresh = false;
-
-      this.activeAssets.forEach(asset => {
-        const raw = asset.symbol.toUpperCase().trim().replace(/[^A-Z0-9]/g, "");
-        const lastTs = this.lastUpdateTimestamps[raw] || 0;
-        if (now - lastTs > 5000) {
-          needsRefresh = true;
-          this.fetchLivePriceForSymbol(asset.symbol);
+      // Only monitor active chart symbol if quiet for > 15 seconds
+      if (this.activeChartDerivSymbol) {
+        const lastTs = this.lastRealInboundBySymbol[this.activeChartDerivSymbol] || 0;
+        if (now - lastTs > 15000) {
+          this.fetchLivePriceForSymbol(this.activeChartDerivSymbol);
         }
-      });
-
-      if (needsRefresh) {
-        this.fetchAllLivePricesREST();
       }
-    }, 1000);
+    }, 10000);
   }
 
   /**
@@ -1949,9 +1942,28 @@ class LivePriceManager {
     }
   }
 
-  private notifyListeners() {
-    this.listeners.forEach(cb => cb({ ...this.prices }));
-    this.notifyTelemetryListeners();
+  private notifyListeners(immediate: boolean = false) {
+    if (immediate) {
+      const snap = { ...this.prices };
+      this.listeners.forEach(cb => {
+        try { cb(snap); } catch (_) {}
+      });
+      this.notifyTelemetryListeners();
+      return;
+    }
+
+    if (this.notifyPending) return;
+    this.notifyPending = true;
+
+    // Throttle UI broadcasts to ~15fps (65ms) to guarantee smooth responsive UI without React state thrashing
+    setTimeout(() => {
+      this.notifyPending = false;
+      const snap = { ...this.prices };
+      this.listeners.forEach(cb => {
+        try { cb(snap); } catch (_) {}
+      });
+      this.notifyTelemetryListeners();
+    }, 65);
   }
 
   public subscribe(cb: PriceListener): () => void {
@@ -2103,8 +2115,7 @@ class LivePriceManager {
       }
     }
 
-    // Fallback REST loop trigger
-    await this.fetchAllLivePricesREST();
+    // In-memory final check
     const finalCheck = this.getPrice(cleanSym);
     if (finalCheck && finalCheck > 0 && finalCheck !== 100.0) {
       return finalCheck;
@@ -2528,7 +2539,26 @@ class LivePriceManager {
       cleanSym.includes("CRYPTO") ||
       cleanSym.includes("BINANCE");
 
-    // 1. TOP PRIORITY FOR FOREX, METALS & INDICES: Direct Official Deriv WebSocket ticks_history (100% Real Deriv Market Candles)
+    // 1. TOP PRIORITY: Canonical Central Server Candle Store (Binomo / Quotex Standard)
+    // Guarantees all users (User A, User B on any device) see 100% IDENTICAL candles & wicks!
+    try {
+      const srvRes = await fetch(`/api/market/candles?symbol=${encodeURIComponent(symbol)}&timeframeSec=${timeframeSec}&limit=${limit}`);
+      if (srvRes.ok) {
+        const srvData = await srvRes.json();
+        if (Array.isArray(srvData?.candles) && srvData.candles.length > 0) {
+          const sanitized = sanitizeCandles(srvData.candles);
+          if (sanitized.length > 0) {
+            this.candleMemoryCache.set(`${cleanSym}_${timeframeSec}`, {
+              candles: sanitized,
+              timestamp: Date.now()
+            });
+            return sanitized;
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 2. Direct Official Deriv WebSocket ticks_history fallback
     const isDerivAsset =
       !isCrypto &&
       (cleanSym.includes("CAD") ||

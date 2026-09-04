@@ -591,10 +591,16 @@ async function autoSettleExpiredSoloTradesServer() {
             });
 
             if (finalPayout > 0) {
-              transaction.update(userRef, {
-                availableBalance: increment(finalPayout),
-                balance: increment(finalPayout)
-              });
+              const uSnap = await transaction.get(userRef);
+              if (uSnap.exists()) {
+                const uData = uSnap.data();
+                const currAvail = Math.max(0, uData?.availableBalance ?? uData?.balance ?? 0);
+                const currBal = Math.max(0, uData?.balance ?? currAvail);
+                transaction.update(userRef, {
+                  availableBalance: currAvail + finalPayout,
+                  balance: currBal + finalPayout
+                });
+              }
 
               const settleTxId = "tx_solo_set_" + Date.now() + "_" + Math.floor(Math.random() * 100000);
               const settleTxRef = doc(db, "wallet_transactions", settleTxId);
@@ -1065,9 +1071,47 @@ app.get("/api/market/forex", async (req, res) => {
 });
 
 // In-memory Server-side Candle Cache & Inflight Promise Deduplication
-const serverCandleCache = new Map<string, { candles: any[]; expiresAt: number }>();
-const lastKnownCandlesMap = new Map<string, any[]>();
+// CENTRAL SERVER CANDLE STORE (BINOMO / QUOTEX STYLE):
+// Stores canonical closed candles per asset & timeframe.
+// Every user app (User A, User B, etc.) receives the EXACT SAME candles and exact same wicks.
+const serverCandleStore = new Map<string, Map<number, { time: number; open: number; high: number; low: number; close: number; volume: number }>>();
 const inflightCandleFetches = new Map<string, Promise<any[] | null>>();
+
+function mergeIntoServerCandleStore(
+  cacheKey: string,
+  candles: { time: number; open: number; high: number; low: number; close: number; volume: number }[],
+  currentPeriodMs: number
+) {
+  let symMap = serverCandleStore.get(cacheKey);
+  if (!symMap) {
+    symMap = new Map();
+    serverCandleStore.set(cacheKey, symMap);
+  }
+
+  for (const c of candles) {
+    if (c.time < currentPeriodMs) {
+      // Completed closed candle: Server locks it so all clients see 100% identical wicks!
+      if (!symMap.has(c.time)) {
+        symMap.set(c.time, { ...c });
+      } else {
+        const existing = symMap.get(c.time)!;
+        // Keep the fullest wick reach
+        existing.high = Math.max(existing.high, c.high);
+        existing.low = Math.min(existing.low, c.low);
+        existing.close = c.close;
+      }
+    }
+  }
+
+  // Keep max 500 closed candles in server memory per symbol
+  if (symMap.size > 500) {
+    const sortedKeys = Array.from(symMap.keys()).sort((a, b) => a - b);
+    while (sortedKeys.length > 500) {
+      const oldest = sortedKeys.shift()!;
+      symMap.delete(oldest);
+    }
+  }
+}
 
 async function fetchAndBuildCandles(
   clean: string,
@@ -1186,10 +1230,47 @@ app.get("/api/market/candles", async (req, res) => {
     const clientTargetPrice = parseFloat(String(req.query.currentPrice || "")) || 0;
 
     const clean = rawSym.replace(/^(FX:|OANDA:|TVC:|CURRENCYCOM:|BINANCE:|NSE:|FX_IDC:|DERIV:)/, "").replace(/[^A-Z0-9]/g, "");
+    const cacheKey = `${clean}_${timeframeSec}`;
+    const nowMs = Date.now();
+    const intervalMs = timeframeSec * 1000;
+    const currentPeriodMs = Math.floor(nowMs / intervalMs) * intervalMs;
 
-    const candles = await fetchAndBuildCandles(clean, rawSym, timeframeSec, limit, clientTargetPrice);
-    if (candles && candles.length > 0) {
-      return res.json({ success: true, symbol: rawSym, candles });
+    const rawCandles = await fetchAndBuildCandles(clean, rawSym, timeframeSec, limit, clientTargetPrice);
+    if (rawCandles && rawCandles.length > 0) {
+      // Merge into Server Canonical Store
+      mergeIntoServerCandleStore(cacheKey, rawCandles, currentPeriodMs);
+
+      // Now build canonical response where all past closed candles come from Server Canonical Store
+      const symStore = serverCandleStore.get(cacheKey);
+      const synchronizedCandles: typeof rawCandles = [];
+
+      for (const c of rawCandles) {
+        if (c.time < currentPeriodMs && symStore && symStore.has(c.time)) {
+          // Serve exact canonical server-locked candle!
+          const canonical = symStore.get(c.time)!;
+          synchronizedCandles.push({ ...canonical });
+        } else {
+          synchronizedCandles.push(c);
+        }
+      }
+
+      // Sort and deduplicate
+      synchronizedCandles.sort((a, b) => a.time - b.time);
+      const uniqueCanonical: typeof synchronizedCandles = [];
+      for (let i = 0; i < synchronizedCandles.length; i++) {
+        if (i === 0 || synchronizedCandles[i].time !== synchronizedCandles[i - 1].time) {
+          uniqueCanonical.push(synchronizedCandles[i]);
+        }
+      }
+
+      return res.json({ success: true, symbol: rawSym, candles: uniqueCanonical, canonical: true });
+    }
+
+    // Fallback: If live fetch failed but server has cached store
+    const symStore = serverCandleStore.get(cacheKey);
+    if (symStore && symStore.size > 0) {
+      const fallbackList = Array.from(symStore.values()).sort((a, b) => a.time - b.time);
+      return res.json({ success: true, symbol: rawSym, candles: fallbackList, canonical: true });
     }
 
     return res.status(404).json({ success: false, message: "No candles available" });
