@@ -115,26 +115,6 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
   const [isDetectingPriceForEdit, setIsDetectingPriceForEdit] = useState(false);
   const [isDetectingPriceForNew, setIsDetectingPriceForNew] = useState(false);
 
-  // Initialize editingPair when assets are available
-  useEffect(() => {
-    if (assets.length > 0) {
-      // Find GER 40 or first asset
-      const defaultAsset = assets.find((a) => a.symbol.includes("DE40") || a.pair.includes("GER 40")) || assets[0];
-      if (!editingPair && defaultAsset) {
-        setEditingPair(defaultAsset);
-        setEditPairForm({
-          pair: defaultAsset.pair,
-          symbol: defaultAsset.symbol,
-          category: defaultAsset.category,
-          price: defaultAsset.basePrice,
-          decimals: defaultAsset.decimals ?? 2,
-          protectedPayout: defaultAsset.protectedPayoutPercentage ?? Number(protectedPayout),
-          standardPayout: defaultAsset.standardPayoutPercentage ?? defaultAsset.payoutPercentage ?? Number(standardPayout)
-        });
-      }
-    }
-  }, [assets]);
-
   // Subscribe to real-time config and trades
   useEffect(() => {
     const unsubConfig = subscribeSoloTradingConfig((freshConfig) => {
@@ -600,20 +580,6 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
     } finally {
       setIsDetectingPriceForNew(false);
     }
-  };
-
-  const handleSelectPairForEditing = (asset: MarketAsset) => {
-    setEditingPair(asset);
-    setInlineEditingSymbol((prev) => (prev === asset.symbol ? null : asset.symbol));
-    setEditPairForm({
-      pair: asset.pair,
-      symbol: asset.symbol,
-      category: asset.category,
-      price: asset.basePrice,
-      decimals: asset.decimals ?? 2,
-      protectedPayout: asset.protectedPayoutPercentage ?? Number(protectedPayout),
-      standardPayout: asset.standardPayoutPercentage ?? asset.payoutPercentage ?? Number(standardPayout)
-    });
   };
 
   const handleToggleInlineEdit = (asset: MarketAsset) => {
@@ -1411,164 +1377,19 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
           </div>
         </div>
 
-        {/* 2-Column / Stacked Layout for EDIT PAIR and ADD NEW CUSTOM TRADING PAIR */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-          {/* A. EDIT PAIR CARD */}
-          <div id="admin-edit-pair-section" className="bg-slate-900 dark:bg-slate-900/95 border border-slate-800 rounded-3xl p-5 md:p-6 shadow-xl relative">
-            <div className="flex items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <Edit2 className="h-4 w-4 text-indigo-400" />
-                <h4 className="text-xs font-black uppercase tracking-wider text-slate-200">
-                  EDIT TRADING PAIR {editingPair ? `(${editingPair.pair})` : ""}
-                </h4>
-              </div>
-
-              {/* Quick Pair Selector */}
-              <select
-                value={editingPair?.symbol || editPairForm.symbol}
-                onChange={(e) => {
-                  const found = assets.find((a) => a.symbol === e.target.value);
-                  if (found) handleSelectPairForEditing(found);
-                }}
-                className="bg-slate-950 border border-slate-700 text-slate-300 rounded-xl px-2.5 py-1 text-[11px] font-semibold max-w-[180px] truncate"
-              >
-                {assets.map((a) => (
-                  <option key={a.symbol} value={a.symbol}>
-                    {a.pair}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <form onSubmit={handleSaveEditPair} className="space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-400 mb-1.5">
-                  Pair Display Name
-                </label>
-                <input
-                  type="text"
-                  value={editPairForm.pair}
-                  onChange={(e) => setEditPairForm({ ...editPairForm, pair: e.target.value })}
-                  placeholder="e.g. GER 40 (DAX Index)"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-bold text-slate-400">
-                    TradingView Symbol
-                  </label>
-                  <button
-                    type="button"
-                    onClick={handleDetectPriceForEdit}
-                    disabled={isDetectingPriceForEdit}
-                    className="text-xs font-bold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                  >
-                    <RefreshCw className={`h-3.5 w-3.5 ${isDetectingPriceForEdit ? "animate-spin" : ""}`} />
-                    {isDetectingPriceForEdit ? "Detecting..." : "Detect Price"}
-                  </button>
-                </div>
-                <input
-                  type="text"
-                  value={editPairForm.symbol}
-                  onChange={(e) => setEditPairForm({ ...editPairForm, symbol: e.target.value.toUpperCase() })}
-                  placeholder="e.g. CURRENCYCOM:DE40"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500 uppercase"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
-                    Category
-                  </label>
-                  <select
-                    value={editPairForm.category}
-                    onChange={(e) => setEditPairForm({ ...editPairForm, category: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white focus:outline-none focus:border-indigo-500"
-                  >
-                    {categories.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
-                    Price (₹)
-                  </label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={editPairForm.price}
-                    onChange={(e) => setEditPairForm({ ...editPairForm, price: e.target.value })}
-                    placeholder="19400"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-emerald-400 placeholder-slate-600 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
-                    Protected Payout %
-                  </label>
-                  <input
-                    type="number"
-                    value={editPairForm.protectedPayout}
-                    onChange={(e) => setEditPairForm({ ...editPairForm, protectedPayout: Number(e.target.value) })}
-                    placeholder="75"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
-                    Standard Payout %
-                  </label>
-                  <input
-                    type="number"
-                    value={editPairForm.standardPayout}
-                    onChange={(e) => setEditPairForm({ ...editPairForm, standardPayout: Number(e.target.value) })}
-                    placeholder="82"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-              </div>
-
-              <div className="flex items-center gap-3 pt-2">
-                <button
-                  type="submit"
-                  className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white rounded-2xl text-xs md:text-sm font-black flex items-center justify-center gap-2 cursor-pointer shadow-lg transition-all"
-                >
-                  <Check className="h-4 w-4" /> Save
-                </button>
-                <button
-                  type="button"
-                  onClick={handleLockEditPrice}
-                  className="flex-1 py-3 bg-amber-600 hover:bg-amber-500 active:bg-amber-700 text-white rounded-2xl text-xs md:text-sm font-black flex items-center justify-center gap-2 cursor-pointer shadow-lg transition-all"
-                >
-                  <Lock className="h-4 w-4" /> Lock Price
-                </button>
-              </div>
-            </form>
+        {/* ADD NEW CUSTOM TRADING PAIR CARD */}
+        <div className="mb-8 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 md:p-6 shadow-sm relative">
+          <div className="flex items-center gap-2 mb-4 pb-3 border-b border-slate-200 dark:border-slate-800">
+            <Plus className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+            <h4 className="text-xs font-black uppercase tracking-wider text-slate-900 dark:text-slate-100">
+              ADD NEW CUSTOM TRADING PAIR
+            </h4>
           </div>
 
-          {/* B. ADD NEW CUSTOM TRADING PAIR CARD */}
-          <div className="bg-slate-900 dark:bg-slate-900/95 border border-slate-800 rounded-3xl p-5 md:p-6 shadow-xl relative">
-            <div className="flex items-center gap-2 mb-4 pb-3 border-b border-slate-800">
-              <Plus className="h-4 w-4 text-emerald-400" />
-              <h4 className="text-xs font-black uppercase tracking-wider text-slate-200">
-                ADD NEW CUSTOM TRADING PAIR
-              </h4>
-            </div>
-
-            <form onSubmit={handleAddNewPair} className="space-y-4">
+          <form onSubmit={handleAddNewPair} className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
                   Pair Name
                 </label>
                 <input
@@ -1576,20 +1397,20 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                   value={newPairForm.pair}
                   onChange={(e) => setNewPairForm({ ...newPairForm, pair: e.target.value })}
                   placeholder="e.g. DOGE / USDT (Dogecoin)"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-emerald-500"
                 />
               </div>
 
               <div>
                 <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-bold text-slate-400">
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
                     TradingView Symbol
                   </label>
                   <button
                     type="button"
                     onClick={handleDetectPriceForNew}
                     disabled={isDetectingPriceForNew}
-                    className="text-xs font-bold text-amber-400 hover:text-amber-300 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                    className="text-xs font-bold text-amber-600 dark:text-amber-400 hover:text-amber-500 flex items-center gap-1 cursor-pointer disabled:opacity-50"
                   >
                     <Zap className={`h-3.5 w-3.5 ${isDetectingPriceForNew ? "animate-spin" : ""}`} />
                     {isDetectingPriceForNew ? "Detecting..." : "Detect Live Price"}
@@ -1600,18 +1421,20 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                   value={newPairForm.symbol}
                   onChange={(e) => setNewPairForm({ ...newPairForm, symbol: e.target.value.toUpperCase() })}
                   placeholder="e.g. BINANCE:DOGEUSDT"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 uppercase"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-emerald-500 uppercase"
                 />
               </div>
+            </div>
 
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
               <div>
-                <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
                   Category
                 </label>
                 <select
                   value={newPairForm.category}
                   onChange={(e) => setNewPairForm({ ...newPairForm, category: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white focus:outline-none focus:border-emerald-500"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
                 >
                   {categories.map((c) => (
                     <option key={c} value={c}>
@@ -1622,7 +1445,7 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
                   Initial Base Price (Optional)
                 </label>
                 <input
@@ -1630,48 +1453,46 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                   value={newPairForm.basePrice}
                   onChange={(e) => setNewPairForm({ ...newPairForm, basePrice: e.target.value })}
                   placeholder="Auto TradingView Live Feed"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-emerald-500"
                 />
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
-                    Protected Payout (%)
-                  </label>
-                  <input
-                    type="number"
-                    value={newPairForm.protectedPayoutPercentage}
-                    onChange={(e) => setNewPairForm({ ...newPairForm, protectedPayoutPercentage: Number(e.target.value) })}
-                    placeholder="80"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
-                    Standard Payout (%)
-                  </label>
-                  <input
-                    type="number"
-                    value={newPairForm.standardPayoutPercentage}
-                    onChange={(e) => setNewPairForm({ ...newPairForm, standardPayoutPercentage: Number(e.target.value) })}
-                    placeholder="85"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                  Protected Payout (%)
+                </label>
+                <input
+                  type="number"
+                  value={newPairForm.protectedPayoutPercentage}
+                  onChange={(e) => setNewPairForm({ ...newPairForm, protectedPayoutPercentage: Number(e.target.value) })}
+                  placeholder="80"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                />
               </div>
 
-              <div className="pt-2">
-                <button
-                  type="submit"
-                  className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white rounded-2xl text-xs md:text-sm font-black flex items-center justify-center gap-2 cursor-pointer shadow-lg transition-all"
-                >
-                  <Plus className="h-4 w-4" /> Add Pair
-                </button>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                  Standard Payout (%)
+                </label>
+                <input
+                  type="number"
+                  value={newPairForm.standardPayoutPercentage}
+                  onChange={(e) => setNewPairForm({ ...newPairForm, standardPayoutPercentage: Number(e.target.value) })}
+                  placeholder="85"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-2xl px-3.5 py-2.5 text-xs md:text-sm font-bold text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                />
               </div>
-            </form>
-          </div>
+            </div>
+
+            <div className="pt-2">
+              <button
+                type="submit"
+                className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white rounded-2xl text-xs md:text-sm font-black flex items-center justify-center gap-2 cursor-pointer shadow-md transition-all"
+              >
+                <Plus className="h-4 w-4" /> Add Pair
+              </button>
+            </div>
+          </form>
         </div>
 
         {/* ACTIVE TRADING PAIRS (N) Search and Filter */}
@@ -1785,9 +1606,9 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
 
                   {/* INLINE EDIT FORM OR LIVE MARKET PRICE SUMMARY */}
                   {inlineEditingSymbol === asset.symbol ? (
-                    <div className="mt-3 p-3.5 sm:p-4 bg-slate-950/95 dark:bg-slate-950 border border-slate-800 rounded-2xl space-y-3 text-left shadow-lg">
-                      <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-                        <div className="flex items-center gap-1.5 text-indigo-400">
+                    <div className="mt-3 p-3.5 sm:p-4 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl space-y-3 text-left shadow-xs">
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-800">
+                        <div className="flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400">
                           <Edit2 className="h-3.5 w-3.5" />
                           <span className="text-[11px] font-black tracking-wider uppercase">
                             EDIT PAIR DETAILS
@@ -1796,7 +1617,7 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                         <button
                           type="button"
                           onClick={() => setInlineEditingSymbol(null)}
-                          className="p-1 text-slate-400 hover:text-white rounded-lg cursor-pointer"
+                          className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-white rounded-lg cursor-pointer"
                           title="Close inline editor"
                         >
                           <X className="h-4 w-4" />
@@ -1804,27 +1625,27 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                       </div>
 
                       <div>
-                        <label className="block text-[11px] font-bold text-slate-400 mb-1">
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-400 mb-1">
                           Pair Display Name
                         </label>
                         <input
                           type="text"
                           value={editPairForm.pair}
                           onChange={(e) => setEditPairForm({ ...editPairForm, pair: e.target.value })}
-                          className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-indigo-500"
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 rounded-xl px-3 py-2 text-xs font-bold text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-indigo-500"
                         />
                       </div>
 
                       <div>
                         <div className="flex items-center justify-between mb-1">
-                          <label className="text-[11px] font-bold text-slate-400">
+                          <label className="text-[11px] font-bold text-slate-700 dark:text-slate-400">
                             TradingView Symbol
                           </label>
                           <button
                             type="button"
                             onClick={handleDetectPriceForEdit}
                             disabled={isDetectingPriceForEdit}
-                            className="text-[10px] font-bold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                            className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 flex items-center gap-1 cursor-pointer disabled:opacity-50"
                           >
                             <RefreshCw className={`h-3 w-3 ${isDetectingPriceForEdit ? "animate-spin" : ""}`} />
                             {isDetectingPriceForEdit ? "Detecting..." : "Detect Price"}
@@ -1834,19 +1655,19 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                           type="text"
                           value={editPairForm.symbol}
                           onChange={(e) => setEditPairForm({ ...editPairForm, symbol: e.target.value.toUpperCase() })}
-                          className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-3 py-2 text-xs font-bold text-white uppercase focus:outline-none focus:border-indigo-500"
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 rounded-xl px-3 py-2 text-xs font-bold text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 uppercase focus:outline-none focus:border-indigo-500"
                         />
                       </div>
 
                       <div className="grid grid-cols-2 gap-2.5">
                         <div>
-                          <label className="block text-[11px] font-bold text-slate-400 mb-1">
+                          <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-400 mb-1">
                             Category
                           </label>
                           <select
                             value={editPairForm.category}
                             onChange={(e) => setEditPairForm({ ...editPairForm, category: e.target.value })}
-                            className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-2.5 py-2 text-xs font-bold text-white focus:outline-none focus:border-indigo-500"
+                            className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 rounded-xl px-2.5 py-2 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
                           >
                             {categories.map((c) => (
                               <option key={c} value={c}>{c}</option>
@@ -1855,7 +1676,7 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                         </div>
 
                         <div>
-                          <label className="block text-[11px] font-bold text-slate-400 mb-1">
+                          <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-400 mb-1">
                             Price (₹)
                           </label>
                           <input
@@ -1863,33 +1684,33 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
                             step="any"
                             value={editPairForm.price}
                             onChange={(e) => setEditPairForm({ ...editPairForm, price: e.target.value })}
-                            className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-2.5 py-2 text-xs font-bold text-emerald-400 focus:outline-none focus:border-indigo-500"
+                            className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 rounded-xl px-2.5 py-2 text-xs font-bold text-emerald-600 dark:text-emerald-400 focus:outline-none focus:border-indigo-500"
                           />
                         </div>
                       </div>
 
                       <div className="grid grid-cols-2 gap-2.5">
                         <div>
-                          <label className="block text-[11px] font-bold text-slate-400 mb-1">
+                          <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-400 mb-1">
                             Protected Payout %
                           </label>
                           <input
                             type="number"
                             value={editPairForm.protectedPayout}
                             onChange={(e) => setEditPairForm({ ...editPairForm, protectedPayout: Number(e.target.value) })}
-                            className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-2.5 py-2 text-xs font-bold text-white focus:outline-none focus:border-indigo-500"
+                            className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 rounded-xl px-2.5 py-2 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
                           />
                         </div>
 
                         <div>
-                          <label className="block text-[11px] font-bold text-slate-400 mb-1">
+                          <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-400 mb-1">
                             Standard Payout %
                           </label>
                           <input
                             type="number"
                             value={editPairForm.standardPayout}
                             onChange={(e) => setEditPairForm({ ...editPairForm, standardPayout: Number(e.target.value) })}
-                            className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-2.5 py-2 text-xs font-bold text-white focus:outline-none focus:border-indigo-500"
+                            className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 rounded-xl px-2.5 py-2 text-xs font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
                           />
                         </div>
                       </div>
