@@ -62,6 +62,7 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
 }) => {
   // In-flight reserved stakes to guarantee rapid back-to-back trades accurately know remaining balance
   const [pendingReservedStake, setPendingReservedStake] = useState<number>(0);
+  const pendingReservedStakeRef = useRef<number>(0);
 
   // Single Unified Balance from currentUser (Firestore single source of truth minus active in-flight reservations)
   const rawAvailableBalance = currentUser ? Math.max(0, currentUser.availableBalance ?? currentUser.balance ?? 0) : 0;
@@ -606,31 +607,29 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
       return;
     }
 
-    if (parsedStake > availableBalance) {
-      setOrderError(`Insufficient Available Balance (₹${availableBalance.toFixed(2)}). Cannot place trade.`);
+    const currentRemaining = Math.max(0, rawAvailableBalance - pendingReservedStakeRef.current);
+    if (parsedStake > currentRemaining) {
+      setOrderError(`Insufficient Available Balance (₹${currentRemaining.toFixed(2)}). Cannot place trade.`);
       if (onTriggerNotification) {
-        onTriggerNotification(`⚠️ Insufficient Available Balance (₹${availableBalance.toFixed(2)}). Cannot place trade.`, "error");
+        onTriggerNotification(`⚠️ Insufficient Available Balance (₹${currentRemaining.toFixed(2)}). Cannot place trade.`, "error");
       }
       return;
     }
 
-    // Lock fast submission buttons during click to prevent duplicate click bounce
-    setIsSubmitting(true);
-    setFastSubmittingType(targetType);
-
-    // Reserve stake locally so rapid sequential clicks immediately see the reduced balance
-    setPendingReservedStake(prev => prev + parsedStake);
+    // Reserve stake locally and immediately in ref so rapid sequential clicks see updated remaining balance
+    pendingReservedStakeRef.current += parsedStake;
+    setPendingReservedStake(pendingReservedStakeRef.current);
 
     // Play instant sound feedback
     playTradeExecutionSound(targetType);
 
     // Optimistically update live profile balance across header badge, quick trade pill, etc.
     if (currentUser && onUpdateProfile) {
-      const nextAvail = Math.max(0, rawAvailableBalance - parsedStake);
+      const nextAvail = Math.max(0, rawAvailableBalance - pendingReservedStakeRef.current);
       onUpdateProfile({
         ...currentUser,
         availableBalance: nextAvail,
-        balance: Math.max(0, (currentUser.balance ?? rawAvailableBalance) - parsedStake)
+        balance: Math.max(0, (currentUser.balance ?? rawAvailableBalance) - pendingReservedStakeRef.current)
       });
     }
 
@@ -691,13 +690,15 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
       endTimeISO,
       selectedDrawRule
     ).then((realTradeId) => {
-      setPendingReservedStake(prev => Math.max(0, prev - parsedStake));
+      pendingReservedStakeRef.current = Math.max(0, pendingReservedStakeRef.current - parsedStake);
+      setPendingReservedStake(pendingReservedStakeRef.current);
       if (realTradeId) {
         setUserTrades(prev => prev.map(t => t.id === tempId ? { ...t, id: realTradeId, txId: "tx_" + realTradeId } : t));
       }
     }).catch((err: any) => {
       console.error("[Instant Trade Execution Error]:", err);
-      setPendingReservedStake(prev => Math.max(0, prev - parsedStake));
+      pendingReservedStakeRef.current = Math.max(0, pendingReservedStakeRef.current - parsedStake);
+      setPendingReservedStake(pendingReservedStakeRef.current);
       const sanitized = sanitizeErrorMessage(err, "Failed to execute solo trade.");
       setOrderError(sanitized);
       if (onTriggerNotification) {
@@ -709,15 +710,10 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
       if (currentUser && onUpdateProfile) {
         onUpdateProfile({
           ...currentUser,
-          availableBalance: rawAvailableBalance,
+          availableBalance: Math.max(0, rawAvailableBalance - pendingReservedStakeRef.current),
           balance: currentUser.balance ?? rawAvailableBalance
         });
       }
-    }).finally(() => {
-      setIsSubmitting(false);
-      setTimeout(() => {
-        setFastSubmittingType(null);
-      }, 350);
     });
   };
 
@@ -1252,13 +1248,11 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
-                    disabled={isSubmitting || fastSubmittingType !== null || !soloConfig.isEnabled || !isOnline || !isCurrentMarketOpen}
+                    disabled={!soloConfig.isEnabled || !isOnline || !isCurrentMarketOpen}
                     onClick={() => executeTradeAction("CALL", true)}
-                    className="w-full py-3 px-3 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white font-black rounded-xl shadow-lg shadow-emerald-600/30 dark:shadow-emerald-950/50 transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50 text-xs sm:text-sm font-mono uppercase active:scale-98"
+                    className="w-full py-3 px-3 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white font-black rounded-xl shadow-lg shadow-emerald-600/30 dark:shadow-emerald-950/50 transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50 text-xs sm:text-sm font-mono uppercase active:scale-95"
                   >
-                    {fastSubmittingType === "CALL" ? (
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                    ) : !isCurrentMarketOpen ? (
+                    {!isCurrentMarketOpen ? (
                       <Lock className="h-4 w-4" />
                     ) : (
                       <TrendingUp className="h-4 w-4 stroke-[3]" />
@@ -1268,13 +1262,11 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
 
                   <button
                     type="button"
-                    disabled={isSubmitting || fastSubmittingType !== null || !soloConfig.isEnabled || !isOnline || !isCurrentMarketOpen}
+                    disabled={!soloConfig.isEnabled || !isOnline || !isCurrentMarketOpen}
                     onClick={() => executeTradeAction("PUT", true)}
-                    className="w-full py-3 px-3 bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 text-white font-black rounded-xl shadow-lg shadow-rose-600/30 dark:shadow-rose-950/50 transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50 text-xs sm:text-sm font-mono uppercase active:scale-98"
+                    className="w-full py-3 px-3 bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 text-white font-black rounded-xl shadow-lg shadow-rose-600/30 dark:shadow-rose-950/50 transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50 text-xs sm:text-sm font-mono uppercase active:scale-95"
                   >
-                    {fastSubmittingType === "PUT" ? (
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                    ) : !isCurrentMarketOpen ? (
+                    {!isCurrentMarketOpen ? (
                       <Lock className="h-4 w-4" />
                     ) : (
                       <TrendingDown className="h-4 w-4 stroke-[3]" />
@@ -1584,13 +1576,11 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
               <div className="grid grid-cols-2 gap-3 pt-1">
                 <button
                   type="button"
-                  disabled={isSubmitting || fastSubmittingType !== null || !soloConfig.isEnabled || !isOnline || !isCurrentMarketOpen}
+                  disabled={!soloConfig.isEnabled || !isOnline || !isCurrentMarketOpen}
                   onClick={() => executeTradeAction("CALL", true)}
                   className="py-4 px-3 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm rounded-xl shadow-lg shadow-emerald-600/30 dark:shadow-emerald-950/60 border border-emerald-400 flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95 disabled:opacity-50"
                 >
-                  {fastSubmittingType === "CALL" ? (
-                    <RefreshCw className="h-6 w-6 animate-spin" />
-                  ) : !isCurrentMarketOpen ? (
+                  {!isCurrentMarketOpen ? (
                     <>
                       <div className="flex items-center gap-1.5 text-base">
                         <Lock className="h-5 w-5" />
@@ -1615,13 +1605,11 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
 
                 <button
                   type="button"
-                  disabled={isSubmitting || fastSubmittingType !== null || !soloConfig.isEnabled || !isOnline || !isCurrentMarketOpen}
+                  disabled={!soloConfig.isEnabled || !isOnline || !isCurrentMarketOpen}
                   onClick={() => executeTradeAction("PUT", true)}
                   className="py-4 px-3 bg-rose-600 hover:bg-rose-500 text-white font-black text-sm rounded-xl shadow-lg shadow-rose-600/30 dark:shadow-rose-950/60 border border-rose-400 flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95 disabled:opacity-50"
                 >
-                  {fastSubmittingType === "PUT" ? (
-                    <RefreshCw className="h-6 w-6 animate-spin" />
-                  ) : !isCurrentMarketOpen ? (
+                  {!isCurrentMarketOpen ? (
                     <>
                       <div className="flex items-center gap-1.5 text-base">
                         <Lock className="h-5 w-5" />

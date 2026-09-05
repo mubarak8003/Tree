@@ -234,7 +234,7 @@ export const IndicatorPanel: React.FC<IndicatorPanelProps> = ({
     const n = dynamicCandles.length;
     if (n === 0) return;
 
-    const rightScaleWidth = 78;
+    const rightScaleWidth = 48;
     const chartWidth = Math.max(10, width - rightScaleWidth);
 
     const totalCandles = n;
@@ -245,7 +245,7 @@ export const IndicatorPanel: React.FC<IndicatorPanelProps> = ({
     if (visibleCount <= 0) return;
 
     // Match exact QuotexProChart right empty slots so candles and indicators align 1:1 vertically
-    const rightEmptySlots = panOffset === 0 ? 4 : 0;
+    const rightEmptySlots = panOffset === 0 ? 1.5 : 0;
     const totalSlotCount = visibleCount + rightEmptySlots;
     const candleWidth = chartWidth / totalSlotCount;
 
@@ -539,23 +539,23 @@ export const IndicatorPanel: React.FC<IndicatorPanelProps> = ({
       if (overboughtYCoord !== null && overboughtVal !== null && overboughtYCoord >= 8 && overboughtYCoord <= height - 8) {
         ctx.fillStyle = isDark ? "rgba(244, 63, 94, 0.85)" : "rgba(225, 29, 72, 0.9)";
         ctx.font = "bold 9px monospace";
-        ctx.textAlign = "left";
-        ctx.fillText(overboughtVal > 0 && config.type === "CCI" ? `+${overboughtVal}` : `${overboughtVal}`, chartWidth + 8, overboughtYCoord + 3);
+        ctx.textAlign = "right";
+        ctx.fillText(overboughtVal > 0 && config.type === "CCI" ? `+${overboughtVal}` : `${overboughtVal}`, width - 2, overboughtYCoord + 3);
       }
 
       // Oversold Label
       if (oversoldYCoord !== null && oversoldVal !== null && oversoldYCoord >= 8 && oversoldYCoord <= height - 8) {
         ctx.fillStyle = isDark ? "rgba(34, 197, 94, 0.85)" : "rgba(22, 163, 74, 0.9)";
         ctx.font = "bold 9px monospace";
-        ctx.textAlign = "left";
-        ctx.fillText(`${oversoldVal}`, chartWidth + 8, oversoldYCoord + 3);
+        ctx.textAlign = "right";
+        ctx.fillText(`${oversoldVal}`, width - 2, oversoldYCoord + 3);
       }
 
       // Zero Badge for CCI
       if (config.type === "CCI" && zeroYCoord !== null && zeroYCoord >= 8 && zeroYCoord <= height - 8) {
-        const badgeW = 34;
+        const badgeW = 26;
         const badgeH = 16;
-        const badgeX = chartWidth + 6;
+        const badgeX = width - badgeW - 1;
         const badgeY = zeroYCoord - badgeH / 2;
 
         ctx.fillStyle = isDark ? "#1e293b" : "#e2e8f0";
@@ -575,14 +575,14 @@ export const IndicatorPanel: React.FC<IndicatorPanelProps> = ({
         ctx.fillStyle = isDark ? "#f1f5f9" : "#334155";
         ctx.font = "bold 9px monospace";
         ctx.textAlign = "center";
-        ctx.fillText("0", badgeX + badgeW / 2 + 2, zeroYCoord + 3);
+        ctx.fillText("0", badgeX + badgeW / 2 + 1, zeroYCoord + 3);
       }
     } else if (config.type === "MACD") {
-      // Draw Zero Badge on Axis for MACD (exact match to screenshot)
+      // Draw Zero Badge on Axis for MACD
       if (zeroYCoord !== null && zeroYCoord >= 8 && zeroYCoord <= height - 8) {
-        const badgeW = 34;
+        const badgeW = 26;
         const badgeH = 16;
-        const badgeX = chartWidth + 6;
+        const badgeX = width - badgeW - 1;
         const badgeY = zeroYCoord - badgeH / 2;
 
         // Pointer badge shape
@@ -603,12 +603,12 @@ export const IndicatorPanel: React.FC<IndicatorPanelProps> = ({
         ctx.fillStyle = isDark ? "#f1f5f9" : "#334155";
         ctx.font = "bold 9px monospace";
         ctx.textAlign = "center";
-        ctx.fillText("0", badgeX + badgeW / 2 + 2, zeroYCoord + 3);
+        ctx.fillText("0", badgeX + badgeW / 2 + 1, zeroYCoord + 3);
       }
     }
 
     // Secondary axis labels
-    const stepCount = 2;
+    const stepCount = 3;
     for (let i = 0; i <= stepCount; i++) {
       const val = minVal + ((maxVal - minVal) * i) / stepCount;
       const y = valToY(val);
@@ -620,9 +620,9 @@ export const IndicatorPanel: React.FC<IndicatorPanelProps> = ({
       if (Math.abs(val) < 0.001) formatted = val.toFixed(4);
 
       ctx.fillStyle = isDark ? "#64748b" : "#94a3b8";
-      ctx.font = "9px monospace";
-      ctx.textAlign = "left";
-      ctx.fillText(formatted, chartWidth + 8, y + 3);
+      ctx.font = "8.5px monospace";
+      ctx.textAlign = "right";
+      ctx.fillText(formatted, width - 2, y + 3);
     }
   }, [config, dynamicCandles, visibleCandlesCount, panOffset, width, height, result, isDark]);
 

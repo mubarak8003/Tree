@@ -1080,7 +1080,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       ctx.save();
       ctx.scale(dpr, dpr);
 
-      const paddingRight = 78;
+      const paddingRight = 48;
       const paddingBottom = 26;
       const chartWidth = width - paddingRight;
       const chartHeight = height - paddingBottom;
@@ -1192,8 +1192,10 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         return scaleMin + ((chartHeight - y) / chartHeight) * scaleRange;
       };
 
-      // Quotex Right-Headroom: leave 4 empty slots on right so active candle isn't pressed against the axis
-      const rightEmptySlots = panOffset === 0 ? 4 : 0;
+      const liveY = getY(activeDrawPrice);
+
+      // Quotex Right-Headroom: compact 1.5 empty slots so active candle sits naturally near price axis
+      const rightEmptySlots = panOffset === 0 ? 1.5 : 0;
       const totalSlotCount = visibleCandles.length + rightEmptySlots;
       const candleWidth = chartWidth / totalSlotCount;
       const barWidth = Math.max(3.5, Math.min(24, candleWidth * 0.74));
@@ -1233,20 +1235,26 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         ctx.strokeStyle = isDark ? "rgba(255, 255, 255, 0.04)" : "rgba(0, 0, 0, 0.05)";
         ctx.lineWidth = 1;
 
-        const gridSteps = 6;
+        const stepHeight = 32;
+        const gridSteps = Math.max(9, Math.min(15, Math.floor(chartHeight / stepHeight)));
         for (let i = 0; i <= gridSteps; i++) {
           const gPrice = scaleMin + (scaleRange / gridSteps) * i;
           const gY = getY(gPrice);
+          if (gY < 8 || gY > chartHeight - 8) continue;
+
           ctx.beginPath();
           ctx.moveTo(0, gY);
           ctx.lineTo(chartWidth, gY);
           ctx.stroke();
 
-          ctx.fillStyle = isDark ? "rgba(148, 163, 184, 0.55)" : "rgba(71, 85, 105, 0.85)";
-          ctx.font = "10px JetBrains Mono, monospace";
-          ctx.textAlign = "left";
+          // If close to live price pill, skip label to prevent collision
+          if (Math.abs(gY - liveY) < 14) continue;
+
+          ctx.fillStyle = isDark ? "rgba(148, 163, 184, 0.6)" : "rgba(71, 85, 105, 0.85)";
+          ctx.font = "9.5px JetBrains Mono, monospace";
+          ctx.textAlign = "right";
           ctx.textBaseline = "middle";
-          ctx.fillText(formatAssetPrice(gPrice, currentSymbol, decimals), chartWidth + 8, gY);
+          ctx.fillText(formatAssetPrice(gPrice, currentSymbol, decimals), width - 2, gY);
         }
 
         const timeStep = Math.max(1, Math.floor(visibleCandles.length / 5));
@@ -1537,7 +1545,6 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       }
 
       // 7. Quotex Pulsating Price Beacon & Laser Price Ray
-      const liveY = getY(activeDrawPrice);
       const isUp = activeDrawPrice >= prevPrice;
       const liveThemeColor = isUp ? quotexGreen : quotexRed;
 
@@ -1574,30 +1581,30 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       ctx.stroke();
 
       // Right-Axis Price Pill (Quotex Style)
-      const pillWidth = 74;
+      const pillWidth = 46;
       const pillHeight = 22;
-      const pillX = chartWidth + 3;
+      const pillX = width - pillWidth - 1;
       const pillY = Math.max(12, Math.min(height - paddingBottom - 12, liveY));
 
       ctx.fillStyle = liveThemeColor;
       ctx.beginPath();
       if (ctx.roundRect) {
-        ctx.roundRect(pillX, pillY - pillHeight / 2, pillWidth, pillHeight, 5);
+        ctx.roundRect(pillX, pillY - pillHeight / 2, pillWidth, pillHeight, 4);
       } else {
         ctx.rect(pillX, pillY - pillHeight / 2, pillWidth, pillHeight);
       }
       ctx.fill();
 
       ctx.fillStyle = "#FFFFFF";
-      ctx.font = "bold 10.5px JetBrains Mono, monospace";
+      ctx.font = "bold 9.5px JetBrains Mono, monospace";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(formatAssetPrice(activeDrawPrice, currentSymbol, decimals), pillX + pillWidth / 2, pillY);
 
       // 7b. Quotex Candle Countdown Timer Badge (Amber / Dark Pill Underneath Price)
-      const timerPillWidth = 58;
+      const timerPillWidth = 42;
       const timerPillHeight = 16;
-      const timerPillX = chartWidth + 3 + (pillWidth - timerPillWidth) / 2;
+      const timerPillX = width - timerPillWidth - 3;
       const timerPillY = pillY + pillHeight / 2 + 11;
 
       if (timerPillY + timerPillHeight / 2 < chartHeight + 20) {
@@ -1654,12 +1661,17 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         const crosshairPrice = getPriceFromY(currentHover.y);
         ctx.fillStyle = isDark ? "#334155" : "#cbd5e1";
         ctx.beginPath();
-        ctx.roundRect(chartWidth + 3, currentHover.y - 9, pillWidth, 18, 4);
+        if (ctx.roundRect) {
+          ctx.roundRect(width - pillWidth - 1, currentHover.y - 9, pillWidth, 18, 4);
+        } else {
+          ctx.rect(width - pillWidth - 1, currentHover.y - 9, pillWidth, 18);
+        }
         ctx.fill();
 
         ctx.fillStyle = isDark ? "#E2E8F0" : "#0f172a";
         ctx.font = "9px JetBrains Mono, monospace";
-        ctx.fillText(formatAssetPrice(crosshairPrice, currentSymbol, decimals), chartWidth + 3 + pillWidth / 2, currentHover.y);
+        ctx.textAlign = "center";
+        ctx.fillText(formatAssetPrice(crosshairPrice, currentSymbol, decimals), width - pillWidth / 2 - 1, currentHover.y);
       }
 
       ctx.restore();
@@ -1787,7 +1799,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    const chartWidth = rect.width - 75;
+    const chartWidth = rect.width - 48;
 
     // Drawing in progress update
     if (drawingInProgressRef.current) {
@@ -1889,7 +1901,8 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       const startIndex = Math.max(0, endIndex - count);
       const visible = allCandles.slice(startIndex, endIndex);
 
-      const candleWidth = chartWidth / (visible.length || 1);
+      const rightEmptySlots = panOffset === 0 ? 1.5 : 0;
+      const candleWidth = chartWidth / ((visible.length || 1) + rightEmptySlots);
       const index = Math.floor(x / candleWidth);
 
       if (index >= 0 && index < visible.length && x <= chartWidth && y <= rect.height - 26) {
