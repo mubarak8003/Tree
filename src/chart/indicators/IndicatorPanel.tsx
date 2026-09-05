@@ -11,6 +11,7 @@ interface IndicatorPanelProps {
   panOffset: number;
   width: number;
   isDarkMode?: boolean;
+  rightScaleWidth?: number;
   onRemove: (id: string) => void;
   onToggleVisibility: (id: string) => void;
   onConfigure: (id: string) => void;
@@ -25,6 +26,7 @@ export const IndicatorPanel: React.FC<IndicatorPanelProps> = ({
   panOffset,
   width,
   isDarkMode,
+  rightScaleWidth: rightScaleWidthProp,
   onRemove,
   onToggleVisibility,
   onConfigure,
@@ -234,7 +236,7 @@ export const IndicatorPanel: React.FC<IndicatorPanelProps> = ({
     const n = dynamicCandles.length;
     if (n === 0) return;
 
-    const rightScaleWidth = 48;
+    const rightScaleWidth = rightScaleWidthProp ?? 48;
     const chartWidth = Math.max(10, width - rightScaleWidth);
 
     const totalCandles = n;
@@ -535,20 +537,20 @@ export const IndicatorPanel: React.FC<IndicatorPanelProps> = ({
 
     // Draw Level Labels & Badges on Axis
     if (config.type === "CCI" || config.type === "RSI" || config.type === "Stochastic") {
-      // Overbought Label
+      // Overbought Label - 1px margin from right edge
       if (overboughtYCoord !== null && overboughtVal !== null && overboughtYCoord >= 8 && overboughtYCoord <= height - 8) {
         ctx.fillStyle = isDark ? "rgba(244, 63, 94, 0.85)" : "rgba(225, 29, 72, 0.9)";
         ctx.font = "bold 9px monospace";
         ctx.textAlign = "right";
-        ctx.fillText(overboughtVal > 0 && config.type === "CCI" ? `+${overboughtVal}` : `${overboughtVal}`, width - 2, overboughtYCoord + 3);
+        ctx.fillText(overboughtVal > 0 && config.type === "CCI" ? `+${overboughtVal}` : `${overboughtVal}`, width - 1, overboughtYCoord + 3);
       }
 
-      // Oversold Label
+      // Oversold Label - 1px margin from right edge
       if (oversoldYCoord !== null && oversoldVal !== null && oversoldYCoord >= 8 && oversoldYCoord <= height - 8) {
         ctx.fillStyle = isDark ? "rgba(34, 197, 94, 0.85)" : "rgba(22, 163, 74, 0.9)";
         ctx.font = "bold 9px monospace";
         ctx.textAlign = "right";
-        ctx.fillText(`${oversoldVal}`, width - 2, oversoldYCoord + 3);
+        ctx.fillText(`${oversoldVal}`, width - 1, oversoldYCoord + 3);
       }
 
       // Zero Badge for CCI
@@ -622,7 +624,7 @@ export const IndicatorPanel: React.FC<IndicatorPanelProps> = ({
       ctx.fillStyle = isDark ? "#64748b" : "#94a3b8";
       ctx.font = "8.5px monospace";
       ctx.textAlign = "right";
-      ctx.fillText(formatted, width - 2, y + 3);
+      ctx.fillText(formatted, width - 1, y + 3);
     }
   }, [config, dynamicCandles, visibleCandlesCount, panOffset, width, height, result, isDark]);
 

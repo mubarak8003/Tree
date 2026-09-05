@@ -218,6 +218,8 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [canvasWidth, setCanvasWidth] = useState<number>(800);
+  const paddingRightRef = useRef<number>(66);
+  const stableScaleWidthRef = useRef<{ symbol: string; width: number }>({ symbol: "", width: 46 });
   const candlesRef = useRef<Candle[]>([]);
   const [candlesVersion, setCandlesVersion] = useState<number>(0);
   const hoverDataRef = useRef<{ candle: Candle | null; x: number; y: number; price: number | null } | null>(null);
@@ -1080,11 +1082,6 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       ctx.save();
       ctx.scale(dpr, dpr);
 
-      const paddingRight = 48;
-      const paddingBottom = 26;
-      const chartWidth = width - paddingRight;
-      const chartHeight = height - paddingBottom;
-
       // Dynamic responsive lerp: instantaneous snappy tracking for fast market ticks (Quotex-grade fluidity)
       const currentTarget = targetPriceRef.current || livePrice;
       if (!isFinite(renderPriceRef.current) || renderPriceRef.current <= 0 || (currentTarget > 0 && Math.abs(renderPriceRef.current - currentTarget) / currentTarget > 0.03)) {
@@ -1093,6 +1090,39 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         renderPriceRef.current += (currentTarget - renderPriceRef.current) * 0.45;
       }
       const activeDrawPrice = renderPriceRef.current;
+
+      // Stabilized price scale measurement (prevents subpixel jitter and unwanted candle shifting on canvas)
+      // Using benchmark digit string (all '8's) so character measurement is 100% constant across price ticks
+      const sampleDrawPrice = activeDrawPrice > 0 ? activeDrawPrice : (livePrice || 100);
+      const sampleFormatted = formatAssetPrice(sampleDrawPrice, currentSymbol, decimals);
+      const benchmarkStr = sampleFormatted.replace(/\d/g, "8");
+
+      ctx.font = "bold 9.5px JetBrains Mono, monospace";
+      const measuredPriceWidth = Math.ceil(ctx.measureText(benchmarkStr).width);
+
+      // Lock width per symbol; only adapt if the symbol changes or character count changes significantly
+      if (
+        stableScaleWidthRef.current.symbol !== currentSymbol ||
+        Math.abs(stableScaleWidthRef.current.width - measuredPriceWidth) >= 3 ||
+        stableScaleWidthRef.current.width < measuredPriceWidth
+      ) {
+        stableScaleWidthRef.current = {
+          symbol: currentSymbol,
+          width: Math.max(measuredPriceWidth, stableScaleWidthRef.current.symbol === currentSymbol ? stableScaleWidthRef.current.width : measuredPriceWidth)
+        };
+      }
+
+      const stableWidth = stableScaleWidthRef.current.width;
+      // Exactly 1px space on both sides of the number:
+      // Left side: 1px space between border and number
+      // Right side: 1px space between number and right edge
+      const paddingRight = stableWidth + 2;
+      const pillWidth = paddingRight;
+      paddingRightRef.current = paddingRight;
+
+      const paddingBottom = 26;
+      const chartWidth = width - paddingRight;
+      const chartHeight = height - paddingBottom;
 
       // 1. Background (Quotex Deep Slate Navy)
       const isDark = document.documentElement.classList.contains("dark");
@@ -1230,6 +1260,8 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         height: chartHeight
       };
 
+      const currentHover = hoverDataRef.current;
+
       // 2. Background Grid (Quotex Clean Precision Grid)
       if (showGrid) {
         ctx.strokeStyle = isDark ? "rgba(255, 255, 255, 0.04)" : "rgba(0, 0, 0, 0.05)";
@@ -1247,15 +1279,28 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
           ctx.lineTo(chartWidth, gY);
           ctx.stroke();
 
-          // If close to live price pill, skip label to prevent collision
-          if (Math.abs(gY - liveY) < 14) continue;
+          // Flexible collision prevention: do not draw grid price text if it collides with or overlaps
+          // the live price pill, the countdown timer badge, or an active crosshair pill
+          const pillTop = liveY - 12;
+          const pillBottom = liveY + 30;
+          if (gY >= pillTop && gY <= pillBottom) continue;
+          if (currentHover && Math.abs(gY - currentHover.y) < 12) continue;
 
           ctx.fillStyle = isDark ? "rgba(148, 163, 184, 0.6)" : "rgba(71, 85, 105, 0.85)";
           ctx.font = "9.5px JetBrains Mono, monospace";
           ctx.textAlign = "right";
           ctx.textBaseline = "middle";
-          ctx.fillText(formatAssetPrice(gPrice, currentSymbol, decimals), width - 2, gY);
+          // 1px space from right edge: with text width = measuredPriceWidth, space to chartWidth border is also exactly 1px
+          ctx.fillText(formatAssetPrice(gPrice, currentSymbol, decimals), width - 1, gY);
         }
+
+        // Vertical divider at right chart border
+        ctx.strokeStyle = isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.08)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(chartWidth, 0);
+        ctx.lineTo(chartWidth, chartHeight);
+        ctx.stroke();
 
         const timeStep = Math.max(1, Math.floor(visibleCandles.length / 5));
         for (let i = 0; i < visibleCandles.length; i += timeStep) {
@@ -1493,7 +1538,9 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
             ctx.font = "bold 9px Inter, sans-serif";
             ctx.fillStyle = isCallSig ? "#34D399" : "#FB7185";
             ctx.textAlign = "center";
-            ctx.fillText(c.pattern, x, isCallSig ? sigY + 12 : sigY - 6);
+            const patWidth = ctx.measureText(c.pattern).width;
+            const safePatX = Math.max(patWidth / 2 + 4, Math.min(chartWidth - patWidth / 2 - 4, x));
+            ctx.fillText(c.pattern, safePatX, isCallSig ? sigY + 12 : sigY - 6);
           }
         });
       }
@@ -1580,16 +1627,15 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       ctx.lineWidth = 1.2;
       ctx.stroke();
 
-      // Right-Axis Price Pill (Quotex Style)
-      const pillWidth = 46;
-      const pillHeight = 22;
-      const pillX = width - pillWidth - 1;
-      const pillY = Math.max(12, Math.min(height - paddingBottom - 12, liveY));
+      // Right-Axis Price Pill (Quotex Style - Exactly 1px space on both sides of the number)
+      const pillHeight = 20;
+      const pillX = chartWidth;
+      const pillY = Math.max(10, Math.min(chartHeight - 10, liveY));
 
       ctx.fillStyle = liveThemeColor;
       ctx.beginPath();
       if (ctx.roundRect) {
-        ctx.roundRect(pillX, pillY - pillHeight / 2, pillWidth, pillHeight, 4);
+        ctx.roundRect(pillX, pillY - pillHeight / 2, pillWidth, pillHeight, 2);
       } else {
         ctx.rect(pillX, pillY - pillHeight / 2, pillWidth, pillHeight);
       }
@@ -1597,15 +1643,16 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
       ctx.fillStyle = "#FFFFFF";
       ctx.font = "bold 9.5px JetBrains Mono, monospace";
-      ctx.textAlign = "center";
+      ctx.textAlign = "right";
       ctx.textBaseline = "middle";
-      ctx.fillText(formatAssetPrice(activeDrawPrice, currentSymbol, decimals), pillX + pillWidth / 2, pillY);
+      // 1px space from right edge: pill starts at chartWidth and ends at width, leaving 1px on left and 1px on right
+      ctx.fillText(formatAssetPrice(activeDrawPrice, currentSymbol, decimals), width - 1, pillY);
 
       // 7b. Quotex Candle Countdown Timer Badge (Amber / Dark Pill Underneath Price)
-      const timerPillWidth = 42;
+      const timerPillWidth = pillWidth;
       const timerPillHeight = 16;
-      const timerPillX = width - timerPillWidth - 3;
-      const timerPillY = pillY + pillHeight / 2 + 11;
+      const timerPillX = chartWidth;
+      const timerPillY = pillY + pillHeight / 2 + 10;
 
       if (timerPillY + timerPillHeight / 2 < chartHeight + 20) {
         const isAppOnline = isOnlineRef.current;
@@ -1614,7 +1661,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         ctx.lineWidth = 1;
         ctx.beginPath();
         if (ctx.roundRect) {
-          ctx.roundRect(timerPillX, timerPillY - timerPillHeight / 2, timerPillWidth, timerPillHeight, 4);
+          ctx.roundRect(timerPillX, timerPillY - timerPillHeight / 2, timerPillWidth, timerPillHeight, 2);
         } else {
           ctx.rect(timerPillX, timerPillY - timerPillHeight / 2, timerPillWidth, timerPillHeight);
         }
@@ -1641,7 +1688,6 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       }
 
       // 8. Crosshair on Hover / Touch (Zero-Lag 60 FPS Direct Ref Access)
-      const currentHover = hoverDataRef.current;
       if (currentHover && currentHover.y !== undefined) {
         ctx.strokeStyle = isDark ? "rgba(255, 255, 255, 0.3)" : "rgba(0, 0, 0, 0.35)";
         ctx.setLineDash([2, 2]);
@@ -1659,19 +1705,25 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         ctx.setLineDash([]);
 
         const crosshairPrice = getPriceFromY(currentHover.y);
+        const crosshairPriceStr = formatAssetPrice(crosshairPrice, currentSymbol, decimals);
+        const chPillX = chartWidth;
+        const chPillW = pillWidth;
+
         ctx.fillStyle = isDark ? "#334155" : "#cbd5e1";
         ctx.beginPath();
         if (ctx.roundRect) {
-          ctx.roundRect(width - pillWidth - 1, currentHover.y - 9, pillWidth, 18, 4);
+          ctx.roundRect(chPillX, currentHover.y - 9, chPillW, 18, 2);
         } else {
-          ctx.rect(width - pillWidth - 1, currentHover.y - 9, pillWidth, 18);
+          ctx.rect(chPillX, currentHover.y - 9, chPillW, 18);
         }
         ctx.fill();
 
         ctx.fillStyle = isDark ? "#E2E8F0" : "#0f172a";
-        ctx.font = "9px JetBrains Mono, monospace";
-        ctx.textAlign = "center";
-        ctx.fillText(formatAssetPrice(crosshairPrice, currentSymbol, decimals), width - pillWidth / 2 - 1, currentHover.y);
+        ctx.font = "bold 9.5px JetBrains Mono, monospace";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        // 1px space from right edge and 1px space from chartWidth border
+        ctx.fillText(crosshairPriceStr, width - 1, currentHover.y);
       }
 
       ctx.restore();
@@ -1799,7 +1851,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    const chartWidth = rect.width - 48;
+    const chartWidth = rect.width - (paddingRightRef.current || 56);
 
     // Drawing in progress update
     if (drawingInProgressRef.current) {
@@ -1987,7 +2039,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     <div className={`bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-2xl flex flex-col transition-all duration-300 ${className}`}>
       
       {/* 1. TOP HEADER & TELEMETRY TOOLBAR (Clean Single-Row Horizontal Scrollable Strip) */}
-      <div className="p-2 sm:p-2.5 bg-slate-50 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 overflow-x-auto whitespace-nowrap scrollbar-none flex-nowrap">
+      <div className="p-2 sm:p-2.5 bg-slate-50 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 overflow-x-auto whitespace-nowrap no-scrollbar flex-nowrap">
         {/* Left: Asset + Live Latency Status */}
         <div className="flex items-center gap-1.5 shrink-0 flex-nowrap">
           <div className="flex items-center gap-1 shrink-0">
@@ -2039,8 +2091,8 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
               }`}
               title={showPatternLabels ? "Candle Pattern Names: ON (Click to Hide)" : "Candle Pattern Names: OFF (Click to Show on Candles)"}
             >
-              <Sparkles className={`h-3.5 w-3.5 ${showPatternLabels ? "text-amber-500 animate-pulse" : "text-slate-400"}`} />
-              <span>Patterns: {showPatternLabels ? "ON" : "OFF"}</span>
+              <Sparkles className={`h-3.5 w-3.5 shrink-0 ${showPatternLabels ? "text-amber-500 animate-pulse" : "text-slate-400"}`} />
+              <span className="shrink-0">{showPatternLabels ? "Patterns ON" : "Patterns OFF"}</span>
             </button>
           )}
 
@@ -2273,6 +2325,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
                 panOffset={panOffset}
                 width={canvasWidth}
                 isDarkMode={isDarkMode}
+                rightScaleWidth={paddingRightRef.current || 60}
                 onRemove={handleRemoveIndicator}
                 onToggleVisibility={handleToggleIndicatorVisibility}
                 onConfigure={() => setIsIndicatorsModalOpen(true)}
