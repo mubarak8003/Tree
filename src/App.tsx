@@ -491,7 +491,11 @@ export default function App() {
             msgsList.push(data);
           }
         });
-        msgsList.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+        msgsList.sort((a, b) => {
+          const timeA = new Date(a.updatedAt || a.lastReplyAt || a.createdAt || 0).getTime();
+          const timeB = new Date(b.updatedAt || b.lastReplyAt || b.createdAt || 0).getTime();
+          return timeB - timeA;
+        });
         setSupportMessages(msgsList);
       }, (err) => {
         console.warn("Support messages listener notice:", err);
@@ -499,7 +503,7 @@ export default function App() {
     } else if (isAdminActive) {
       const adminSupportQuery = query(
         collection(db, "support_messages"),
-        limit(100)
+        limit(150)
       );
       unsubscribeSupport = onSnapshot(adminSupportQuery, (snapshot) => {
         const msgsList: SupportMessage[] = [];
@@ -509,7 +513,11 @@ export default function App() {
             msgsList.push(data);
           }
         });
-        msgsList.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+        msgsList.sort((a, b) => {
+          const timeA = new Date(a.updatedAt || a.lastReplyAt || a.createdAt || 0).getTime();
+          const timeB = new Date(b.updatedAt || b.lastReplyAt || b.createdAt || 0).getTime();
+          return timeB - timeA;
+        });
         setSupportMessages(msgsList);
       }, (err) => {
         console.warn("Admin support listener notice:", err);

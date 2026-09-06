@@ -441,10 +441,16 @@ export interface SupportMessage {
   message: string;
   adminReply?: string;
   repliedAt?: string;
-  status: "OPEN" | "RESOLVED";
+  status: "OPEN" | "IN_PROGRESS" | "RESOLVED";
   createdAt: string;
   updatedAt?: string;
   thread?: SupportThreadMessage[];
+  lastSender?: "USER" | "ADMIN";
+  unreadByAdmin?: boolean;
+  unreadByUser?: boolean;
+  lastReplyText?: string;
+  lastReplyAt?: string;
+  priority?: "LOW" | "NORMAL" | "HIGH" | "URGENT";
 }
 
 export const DEFAULT_LIMITS_POLICY_NOTE = 

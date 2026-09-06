@@ -129,7 +129,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     { id: "limits", label: "Parameters", icon: Sliders },
     { id: "balance_report", label: "Balance & PnL", icon: Scale },
     { id: "market_monitor", label: "Market Monitor", icon: BarChart2 },
-    { id: "support", label: "Support", icon: MessageSquare, count: supportMessages.filter((m) => m.status === "OPEN").length },
+    { 
+      id: "support", 
+      label: "Support", 
+      icon: MessageSquare, 
+      count: supportMessages.filter((m) => m.status === "OPEN" || m.unreadByAdmin || m.lastSender === "USER").length 
+    },
     { id: "config", label: "System Config", icon: Settings },
     { id: "rbac_staff", label: "Staff & RBAC", icon: Shield },
     { id: "logs", label: "Tx Logs", icon: ShieldCheck },
@@ -249,6 +254,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             supportMessages={supportMessages}
             onTriggerNotification={onTriggerNotification}
             adminEmail={adminEmail}
+            allUsers={allUsers}
           />
         )}
 

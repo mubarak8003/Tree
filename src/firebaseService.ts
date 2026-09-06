@@ -1157,7 +1157,7 @@ export async function createSupportMessage(
   const initialThreadItem: SupportThreadMessage = {
     id: "th_u_" + Date.now(),
     sender: "USER",
-    senderName: userName || userEmail?.split("@")[0] || "User",
+    senderName: userName || userEmail?.split("@")[0] || "Trader",
     text: cleanMsg,
     timestamp: now
   };
@@ -1172,7 +1172,12 @@ export async function createSupportMessage(
     status: "OPEN",
     createdAt: now,
     updatedAt: now,
-    thread: [initialThreadItem]
+    thread: [initialThreadItem],
+    lastSender: "USER",
+    unreadByAdmin: true,
+    unreadByUser: false,
+    lastReplyText: cleanMsg,
+    lastReplyAt: now
   };
 
   await setDoc(msgRef, newMsg);
@@ -1210,7 +1215,7 @@ export async function sendUserSupportReply(
       });
       if (data.adminReply) {
         existingThread.push({
-          id: "th_a_init_" + Date.now(),
+          id: "th_a_init_" + (Date.now() + 1),
           sender: "ADMIN",
           senderName: "Support Admin",
           text: data.adminReply,
@@ -1220,20 +1225,25 @@ export async function sendUserSupportReply(
     }
   }
 
-  existingThread.push({
+  const newThreadItem: SupportThreadMessage = {
     id: "th_u_" + Date.now(),
     sender: "USER",
     senderName: userName || "User",
     text: cleanReply,
     timestamp: now
-  });
+  };
+  existingThread.push(newThreadItem);
 
   await setDoc(
     msgRef,
     {
       thread: existingThread,
       status: "OPEN", // Re-open ticket so Admin is notified
-      updatedAt: now
+      updatedAt: now,
+      lastSender: "USER",
+      unreadByAdmin: true,
+      lastReplyText: cleanReply,
+      lastReplyAt: now
     },
     { merge: true }
   );
@@ -1245,7 +1255,8 @@ export async function sendUserSupportReply(
 export async function replyToSupportMessage(
   messageId: string,
   adminReply: string,
-  markResolved: boolean = true
+  markResolved: boolean = true,
+  adminName: string = "Support Admin"
 ): Promise<void> {
   const cleanReply = adminReply.trim();
   if (!cleanReply) {
@@ -1268,13 +1279,22 @@ export async function replyToSupportMessage(
         text: data.message,
         timestamp: data.createdAt
       });
+      if (data.adminReply) {
+        existingThread.push({
+          id: "th_a_init_" + (Date.now() + 1),
+          sender: "ADMIN",
+          senderName: "Support Admin",
+          text: data.adminReply,
+          timestamp: data.repliedAt || data.createdAt
+        });
+      }
     }
   }
 
   existingThread.push({
     id: "th_a_" + Date.now(),
     sender: "ADMIN",
-    senderName: "Support Admin",
+    senderName: adminName,
     text: cleanReply,
     timestamp: now
   });
@@ -1285,11 +1305,42 @@ export async function replyToSupportMessage(
       adminReply: cleanReply,
       repliedAt: now,
       updatedAt: now,
-      status: markResolved ? "RESOLVED" : "OPEN",
-      thread: existingThread
+      status: markResolved ? "RESOLVED" : "IN_PROGRESS",
+      thread: existingThread,
+      lastSender: "ADMIN",
+      unreadByAdmin: false,
+      unreadByUser: true,
+      lastReplyText: cleanReply,
+      lastReplyAt: now
     },
     { merge: true }
   );
+}
+
+/**
+ * Update support ticket status (e.g. OPEN, IN_PROGRESS, RESOLVED)
+ */
+export async function updateSupportTicketStatus(
+  messageId: string,
+  status: "OPEN" | "IN_PROGRESS" | "RESOLVED"
+): Promise<void> {
+  const msgRef = doc(db, "support_messages", messageId);
+  await setDoc(
+    msgRef,
+    {
+      status,
+      updatedAt: new Date().toISOString()
+    },
+    { merge: true }
+  );
+}
+
+/**
+ * Mark support ticket as read by Admin
+ */
+export async function markSupportTicketReadByAdmin(messageId: string): Promise<void> {
+  const msgRef = doc(db, "support_messages", messageId);
+  await setDoc(msgRef, { unreadByAdmin: false }, { merge: true });
 }
 
 /**
@@ -1311,6 +1362,15 @@ export async function sendAdminDirectMessage(
 
   const msgId = "admin_msg_" + Date.now();
   const msgRef = doc(db, "support_messages", msgId);
+  const now = new Date().toISOString();
+
+  const initialThreadItem: SupportThreadMessage = {
+    id: "th_a_" + Date.now(),
+    sender: "ADMIN",
+    senderName: "Support Admin",
+    text: cleanMsg,
+    timestamp: now
+  };
 
   const newMsg: SupportMessage = {
     id: msgId,
@@ -1318,11 +1378,18 @@ export async function sendAdminDirectMessage(
     userEmail: userEmail || "user@example.com",
     userName: userName || userEmail?.split("@")[0] || "User",
     subject: "📩 " + cleanSub,
-    message: "Admin Announcement / Notice",
+    message: cleanMsg,
     adminReply: cleanMsg,
-    repliedAt: new Date().toISOString(),
-    status: "RESOLVED",
-    createdAt: new Date().toISOString()
+    repliedAt: now,
+    status: "OPEN",
+    createdAt: now,
+    updatedAt: now,
+    thread: [initialThreadItem],
+    lastSender: "ADMIN",
+    unreadByAdmin: false,
+    unreadByUser: true,
+    lastReplyText: cleanMsg,
+    lastReplyAt: now
   };
 
   await setDoc(msgRef, newMsg);
