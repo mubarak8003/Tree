@@ -60,14 +60,8 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
   onTriggerNotification,
   onUpdateProfile
 }) => {
-  // In-flight reserved stakes to guarantee rapid back-to-back trades accurately know remaining balance
-  const [pendingReservedStake, setPendingReservedStake] = useState<number>(0);
-  const pendingReservedStakeRef = useRef<number>(0);
-
-  // Single Unified Balance from currentUser (Firestore single source of truth minus active in-flight reservations)
-  const rawAvailableBalance = currentUser ? Math.max(0, currentUser.availableBalance ?? currentUser.balance ?? 0) : 0;
-  const effectiveAvailableBalance = Math.max(0, rawAvailableBalance - pendingReservedStake);
-  const availableBalance = effectiveAvailableBalance;
+  // Single Unified Balance from currentUser (Firestore single source of truth)
+  const availableBalance = currentUser ? Math.max(0, currentUser.availableBalance ?? currentUser.balance ?? 0) : 0;
 
   // Track internet connectivity status
   const [isOnline, setIsOnline] = useState<boolean>(() => typeof navigator !== "undefined" ? navigator.onLine : true);
@@ -302,59 +296,52 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
     return () => unsubscribe();
   }, [selectedAsset]);
 
-  // Subscribe to user's solo trades with smart optimistic merging
+  // Subscribe to user's solo trades with deterministic ID merging (zero flicker on rapid consecutive trades)
   useEffect(() => {
     if (!currentUser) return;
     const unsubscribe = subscribeUserSoloTrades(currentUser.id, (firestoreTrades) => {
       setUserTrades((prev) => {
-        const tempRunning = prev.filter(
-          t => t.id.startsWith("temp_") && t.status === "RUNNING" && new Date(t.endTime).getTime() > Date.now()
-        );
-        const merged = firestoreTrades.map((ft) => {
-          // If trade was already settled locally (status !== "RUNNING"), keep local settled state if Firestore snapshot still says "RUNNING"
-          // OR if Firestore fallback-settled it as DRAW with exit === entry, while local trade was genuinely WON or LOST with a real market exit tick
-          const localMatch = prev.find((p) => p.id === ft.id);
-          if (localMatch && localMatch.status !== "RUNNING") {
+        const localMap = new Map(prev.map((p) => [p.id, p]));
+        const remoteIds = new Set(firestoreTrades.map((f) => f.id));
+        const seenIds = new Set<string>();
+        const merged: SoloTrade[] = [];
+
+        firestoreTrades.forEach((ft) => {
+          if (!ft || !ft.id || seenIds.has(ft.id)) return;
+          seenIds.add(ft.id);
+
+          const local = localMap.get(ft.id);
+          if (local && local.status !== "RUNNING") {
+            // If trade was already settled locally in 0ms, keep local settled state if Firestore snapshot is still lagging at RUNNING
             if (ft.status === "RUNNING") {
-              return localMatch;
+              merged.push(local);
+              return;
             }
             if (
               ft.status === "DRAW" &&
-              (localMatch.status === "WON" || localMatch.status === "LOST") &&
-              typeof localMatch.exitPrice === "number" &&
-              localMatch.exitPrice !== localMatch.entryPrice
+              (local.status === "WON" || local.status === "LOST") &&
+              typeof local.exitPrice === "number" &&
+              local.exitPrice !== local.entryPrice
             ) {
-              return localMatch;
+              merged.push(local);
+              return;
             }
           }
-
-          const tempMatch = tempRunning.find(
-            temp => temp.tradingSymbol === ft.tradingSymbol &&
-                    temp.tradeType === ft.tradeType &&
-                    temp.stake === ft.stake &&
-                    Math.abs(new Date(ft.startTime).getTime() - new Date(temp.startTime).getTime()) < 5000
-          );
-          if (tempMatch && ft.status === "RUNNING") {
-            return {
-              ...ft,
-              startTime: tempMatch.startTime,
-              endTime: tempMatch.endTime
-            };
-          }
-          return ft;
+          merged.push(ft);
         });
 
-        tempRunning.forEach((temp) => {
-          const matched = firestoreTrades.some(
-            ft => ft.tradingSymbol === temp.tradingSymbol &&
-                  ft.tradeType === temp.tradeType &&
-                  ft.stake === temp.stake &&
-                  Math.abs(new Date(ft.startTime).getTime() - new Date(temp.startTime).getTime()) < 5000
-          );
-          if (!matched) {
-            merged.unshift(temp);
+        // Retain any in-flight local trade that has not yet appeared in firestoreTrades snapshot
+        prev.forEach((local) => {
+          if (local && local.id && !seenIds.has(local.id) && !remoteIds.has(local.id)) {
+            const isRunning = local.status === "RUNNING" && new Date(local.endTime).getTime() > Date.now();
+            const isRecent = local.startTime && (Date.now() - new Date(local.startTime).getTime() < 180000);
+            if (isRunning || isRecent) {
+              seenIds.add(local.id);
+              merged.push(local);
+            }
           }
         });
+
         return merged.sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
       });
     });
@@ -451,8 +438,17 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
             return updated;
           });
 
-          // 2. Settlement payout is handled atomically by Firestore transaction in settleSoloTrade(),
-          // which triggers the real-time onSnapshot listener in App.tsx to update currentUser.
+          // 2. Settlement payout is credited immediately to user profile in 0ms
+          if (payout > 0 && currentUser && onUpdateProfile) {
+            const curAvail = currentUser.availableBalance ?? currentUser.balance ?? 0;
+            const curBal = currentUser.balance ?? curAvail;
+            onUpdateProfile({
+              ...currentUser,
+              availableBalance: curAvail + payout,
+              balance: curBal + payout
+            });
+          }
+
           // Trigger outcome notification:
 
           if (onTriggerNotification) {
@@ -471,15 +467,13 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
           console.log(`[Instant Trade Auto-Settled] ID=${trade.id} outcome=${outcome} exitPrice=${currentExitPrice}`);
 
           // 3. Sync to Firestore in background asynchronously
-          if (!trade.id.startsWith("temp_")) {
-            settleSoloTrade(trade.id, currentExitPrice)
-              .catch((err) => {
-                console.error(`[Background Firestore Settle Error] Trade ${trade.id}:`, err);
-              })
-              .finally(() => {
-                settlingTradeIds.current.delete(trade.id);
-              });
-          }
+          settleSoloTrade(trade.id, currentExitPrice)
+            .catch((err) => {
+              console.error(`[Background Firestore Settle Error] Trade ${trade.id}:`, err);
+            })
+            .finally(() => {
+              settlingTradeIds.current.delete(trade.id);
+            });
         }
       }
     });
@@ -607,7 +601,7 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
       return;
     }
 
-    const currentRemaining = Math.max(0, rawAvailableBalance - pendingReservedStakeRef.current);
+    const currentRemaining = availableBalance;
     if (parsedStake > currentRemaining) {
       setOrderError(`Insufficient Available Balance (₹${currentRemaining.toFixed(2)}). Cannot place trade.`);
       if (onTriggerNotification) {
@@ -616,20 +610,18 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
       return;
     }
 
-    // Reserve stake locally and immediately in ref so rapid sequential clicks see updated remaining balance
-    pendingReservedStakeRef.current += parsedStake;
-    setPendingReservedStake(pendingReservedStakeRef.current);
-
     // Play instant sound feedback
     playTradeExecutionSound(targetType);
 
-    // Optimistically update live profile balance across header badge, quick trade pill, etc.
+    // Optimistically deduct exact stake amount once across header badge and trading desk
+    const preTradeAvail = availableBalance;
+    const preTradeTotal = currentUser.balance ?? availableBalance;
     if (currentUser && onUpdateProfile) {
-      const nextAvail = Math.max(0, rawAvailableBalance - pendingReservedStakeRef.current);
+      const nextAvail = Math.max(0, preTradeAvail - parsedStake);
       onUpdateProfile({
         ...currentUser,
         availableBalance: nextAvail,
-        balance: Math.max(0, (currentUser.balance ?? rawAvailableBalance) - pendingReservedStakeRef.current)
+        balance: Math.max(0, preTradeTotal - parsedStake)
       });
     }
 
@@ -638,15 +630,15 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
     const freshPrice = priceSnap.price > 0 ? priceSnap.price : currentPrice;
     localStorage.setItem("solo_last_stake", stakeAmount);
 
-    // Create instant optimistic trade object for 0ms UI feedback in Active Running Trades card
+    // Create instant deterministic trade object for 0ms UI feedback in Active Running Trades
     const now = new Date();
     const startTimeISO = now.toISOString();
     const endTimeISO = new Date(now.getTime() + durationSeconds * 1000).toISOString();
     const expectedPayout = parsedStake + (parsedStake * payoutPct) / 100;
-    const tempId = "temp_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7);
+    const deterministicTradeId = "solo_tx_" + Date.now() + "_" + Math.floor(Math.random() * 1000000);
 
     const optimisticTrade: SoloTrade = {
-      id: tempId,
+      id: deterministicTradeId,
       userId: currentUser.id,
       userEmail: currentUser.email || "",
       userName: currentUser.name || "Trader",
@@ -664,19 +656,27 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
       assetPair: currentAsset.pair,
       tradingSymbol: currentAsset.symbol,
       drawRule: selectedDrawRule,
-      txId: "tx_" + tempId
+      txId: "tx_solo_inv_" + deterministicTradeId.replace("solo_tx_", "")
     };
 
-    setUserTrades(prev => [optimisticTrade, ...prev]);
+    setUserTrades((prev) => [optimisticTrade, ...prev.filter((t) => t.id !== deterministicTradeId)]);
+
+    // Persist optimistic trade immediately into local cache so subscribe listener seamlessly preserves it
+    try {
+      const existing = localStorage.getItem(`solo_trades_${currentUser.id}`);
+      const parsed: SoloTrade[] = existing ? JSON.parse(existing) : [];
+      const filtered = parsed.filter((t) => t.id !== deterministicTradeId);
+      localStorage.setItem(`solo_trades_${currentUser.id}`, JSON.stringify([optimisticTrade, ...filtered]));
+    } catch {}
 
     if (onTriggerNotification) {
       onTriggerNotification(
-        `⚡ ${targetType} Trade (${selectedMode === "PROTECTED" ? "Protected Mode" : "Standard Mode"}) Executed on ${currentAsset.pair} @ ${formatAssetPrice(freshPrice, currentAsset.pair, currentAsset.decimals)} (${durationSeconds}s)`,
+        `⚡ ${targetType} ₹${parsedStake} Placed • ${currentAsset.pair} @ ${formatAssetPrice(freshPrice, currentAsset.pair, currentAsset.decimals)} (${durationSeconds}s)`,
         "success"
       );
     }
 
-    // Fire atomic trade placement to Firestore (enforced via runTransaction)
+    // Fire atomic trade placement to Firestore with exact deterministicTradeId
     placeSoloTrade(
       currentUser.id,
       targetType,
@@ -688,30 +688,23 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
       payoutPct,
       startTimeISO,
       endTimeISO,
-      selectedDrawRule
-    ).then((realTradeId) => {
-      pendingReservedStakeRef.current = Math.max(0, pendingReservedStakeRef.current - parsedStake);
-      setPendingReservedStake(pendingReservedStakeRef.current);
-      if (realTradeId) {
-        setUserTrades(prev => prev.map(t => t.id === tempId ? { ...t, id: realTradeId, txId: "tx_" + realTradeId } : t));
-      }
-    }).catch((err: any) => {
+      selectedDrawRule,
+      deterministicTradeId
+    ).catch((err: any) => {
       console.error("[Instant Trade Execution Error]:", err);
-      pendingReservedStakeRef.current = Math.max(0, pendingReservedStakeRef.current - parsedStake);
-      setPendingReservedStake(pendingReservedStakeRef.current);
       const sanitized = sanitizeErrorMessage(err, "Failed to execute solo trade.");
       setOrderError(sanitized);
       if (onTriggerNotification) {
         onTriggerNotification(sanitized, "error");
       }
-      setUserTrades(prev => prev.filter(t => t.id !== tempId));
+      setUserTrades((prev) => prev.filter((t) => t.id !== deterministicTradeId));
 
       // Revert optimistic profile balance if trade placement was rejected
       if (currentUser && onUpdateProfile) {
         onUpdateProfile({
           ...currentUser,
-          availableBalance: Math.max(0, rawAvailableBalance - pendingReservedStakeRef.current),
-          balance: currentUser.balance ?? rawAvailableBalance
+          availableBalance: preTradeAvail,
+          balance: preTradeTotal
         });
       }
     });
@@ -724,10 +717,25 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
 
   const activeTradesContainerRef = useRef<HTMLDivElement>(null);
 
-  const runningTrades = userTrades
-    .filter((t) => t.status === "RUNNING")
-    .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
-  const completedTrades = userTrades.filter((t) => t.status !== "RUNNING");
+  const runningTrades = useMemo(() => {
+    const seen = new Set<string>();
+    return userTrades
+      .filter((t) => {
+        if (!t || t.status !== "RUNNING" || !t.id || seen.has(t.id)) return false;
+        seen.add(t.id);
+        return true;
+      })
+      .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+  }, [userTrades]);
+
+  const completedTrades = useMemo(() => {
+    const seen = new Set<string>();
+    return userTrades.filter((t) => {
+      if (!t || t.status === "RUNNING" || !t.id || seen.has(t.id)) return false;
+      seen.add(t.id);
+      return true;
+    });
+  }, [userTrades]);
 
   useEffect(() => {
     if (activeTradesContainerRef.current) {
@@ -1088,7 +1096,7 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
 
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-2xl flex flex-col">
             {/* Active Trade "In Short" Position Strip (Positioned between TradingView Chart & Quick Trade) */}
-            {runningTrades.length > 0 && (
+            {soloConfig.showActiveTradesStrip !== false && runningTrades.length > 0 && (
               <div 
                 ref={activeTradesContainerRef}
                 className="px-3 py-2.5 bg-slate-50 dark:bg-slate-950/95 border-t border-slate-200 dark:border-slate-800/80 flex items-center gap-2.5 overflow-x-auto no-scrollbar scroll-smooth snap-x snap-mandatory"
@@ -1169,19 +1177,12 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
 
             {/* Quick Chart Trade Action Bar (Right Under TradingView Chart) */}
             <div className="p-3 bg-slate-50 dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800 space-y-3">
-              {/* Header row: Quick Trade Label + In Short Tag + User Available Balance + Expiry Duration */}
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                <div className="flex items-center gap-2">
-                  <span className="font-extrabold text-slate-900 dark:text-white font-mono flex items-center gap-1">
-                    <Zap className="h-3.5 w-3.5 text-amber-500 dark:text-amber-400" />
-                    Quick Trade
-                  </span>
-
-                  {/* Live Wallet Balance Display */}
-                  <div className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-600 dark:text-emerald-400 font-mono font-black text-xs shadow-xs">
-                    <Coins className="h-3.5 w-3.5 text-emerald-500 dark:text-emerald-400" />
-                    <span>Bal: ₹{Math.max(0, currentUser ? availableBalance : 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                  </div>
+              {/* Row: User Available Balance on Left + Expiry Duration selector */}
+              <div className="flex items-center justify-between gap-2 text-xs">
+                {/* Live Wallet Balance Display (Left) */}
+                <div className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-600 dark:text-emerald-400 font-mono font-black text-xs shadow-xs shrink-0">
+                  <Coins className="h-3.5 w-3.5 text-emerald-500 dark:text-emerald-400" />
+                  <span>Bal: ₹{Math.max(0, currentUser ? availableBalance : 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                 </div>
 
                 {/* Quick Expiry Duration selector */}

@@ -3176,6 +3176,7 @@ export const DEFAULT_SOLO_CATEGORIES = ["Crypto", "Forex", "Commodities", "Metal
 export const DEFAULT_SOLO_TRADING_CONFIG: SoloTradingConfig = {
   isEnabled: true,
   showPatternRadar: true,
+  showActiveTradesStrip: true,
   defaultPayoutPercentage: 85,
   protectedPayoutPercentage: 80,
   standardPayoutPercentage: 85,
@@ -3296,6 +3297,9 @@ export function sanitizeErrorMessage(
  * 5. Saves running trade in 'solo_trades' collection
  * 6. Logs wallet transaction 'TRADE_INVEST'
  */
+// Serialized transaction queue for atomic back-to-back solo trade placements without Firestore document contention
+let soloTradePlacementQueue: Promise<any> = Promise.resolve();
+
 export async function placeSoloTrade(
   userId: string,
   tradeType: SoloTradeType,
@@ -3307,15 +3311,52 @@ export async function placeSoloTrade(
   customPayoutPercentage?: number,
   clientStartTimeISO?: string,
   clientEndTimeISO?: string,
-  drawRuleParam?: "REFUND" | "LOSS"
+  drawRuleParam?: "REFUND" | "LOSS",
+  customTradeId?: string
+): Promise<string> {
+  const currentTask = async () => {
+    return executeSoloTradePlacement(
+      userId,
+      tradeType,
+      stake,
+      entryPrice,
+      durationSeconds,
+      assetPair,
+      tradingSymbol,
+      customPayoutPercentage,
+      clientStartTimeISO,
+      clientEndTimeISO,
+      drawRuleParam,
+      customTradeId
+    );
+  };
+
+  const queuePromise = soloTradePlacementQueue.then(currentTask, currentTask);
+  soloTradePlacementQueue = queuePromise.catch(() => {});
+  return queuePromise;
+}
+
+async function executeSoloTradePlacement(
+  userId: string,
+  tradeType: SoloTradeType,
+  stake: number,
+  entryPrice: number,
+  durationSeconds: number,
+  assetPair: string,
+  tradingSymbol: string,
+  customPayoutPercentage?: number,
+  clientStartTimeISO?: string,
+  clientEndTimeISO?: string,
+  drawRuleParam?: "REFUND" | "LOSS",
+  customTradeId?: string
 ): Promise<string> {
   if (typeof navigator !== "undefined" && !navigator.onLine) {
     throw new Error("⚠️ Internet Disconnected: Cannot place trade while offline. Please check your internet connection.");
   }
-  const tradeId = "solo_tx_" + Date.now() + "_" + Math.floor(Math.random() * 100000);
+  const tradeId = customTradeId || ("solo_tx_" + Date.now() + "_" + Math.floor(Math.random() * 100000));
   const userRef = doc(db, "users", userId);
   const tradeRef = doc(db, "solo_trades", tradeId);
-  const walletTxId = "tx_solo_inv_" + Date.now() + "_" + Math.floor(Math.random() * 100000);
+  const walletTxId = "tx_solo_inv_" + (customTradeId ? customTradeId.replace("solo_tx_", "") : (Date.now() + "_" + Math.floor(Math.random() * 100000)));
   const walletTxRef = doc(db, "wallet_transactions", walletTxId);
   let activeDrawRule = drawRuleParam;
   if (!activeDrawRule) {
@@ -3334,80 +3375,109 @@ export async function placeSoloTrade(
 
   try {
     let finalAvailBalance = 0;
+    let attempt = 0;
+    let lastErr: any = null;
 
-    await runTransaction(db, async (transaction) => {
-      const userSnap = await transaction.get(userRef);
-      if (!userSnap.exists()) {
-        throw new Error("User profile not found");
+    while (attempt < 3) {
+      try {
+        attempt++;
+        await runTransaction(db, async (transaction) => {
+          const userSnap = await transaction.get(userRef);
+          if (!userSnap.exists()) {
+            throw new Error("User profile not found");
+          }
+          const user = userSnap.data() as UserProfile;
+
+          if (!isUserMobileVerified(user)) {
+            throw new Error("Mobile Verification Required! Trading is locked until your mobile number is verified. Please verify in Profile Settings.");
+          }
+
+          const currAvail = typeof user.availableBalance === "number" ? user.availableBalance : (typeof user.balance === "number" ? user.balance : 0);
+          if (currAvail < stake) {
+            throw new Error(`Insufficient Available Balance! You have ₹${Math.max(0, currAvail).toFixed(2)}, but tried to stake ₹${stake}.`);
+          }
+
+          const now = new Date();
+          const startTimeISO = clientStartTimeISO || now.toISOString();
+          const endTimeISO = clientEndTimeISO || new Date(now.getTime() + durationSeconds * 1000).toISOString();
+
+          let payoutPct = customPayoutPercentage && customPayoutPercentage > 0 ? customPayoutPercentage : 85;
+          const expectedPayout = stake + (stake * payoutPct) / 100;
+
+          const newSoloTrade: SoloTrade = {
+            id: tradeId,
+            userId: user.id,
+            userEmail: user.email,
+            userName: user.name || user.email.split("@")[0],
+            tradeType,
+            stake,
+            entryPrice,
+            exitPrice: null,
+            payoutPercentage: payoutPct,
+            expectedPayout,
+            profitOrLoss: null,
+            startTime: startTimeISO,
+            endTime: endTimeISO,
+            durationSeconds,
+            status: "RUNNING",
+            assetPair,
+            tradingSymbol,
+            drawRule: activeDrawRule,
+            txId: walletTxId
+          };
+
+          const newAvail = Math.max(0, currAvail - stake);
+          const currTotal = typeof user.balance === "number" ? user.balance : currAvail;
+          const newTotal = Math.max(0, currTotal - stake);
+          finalAvailBalance = newAvail;
+
+          const walletTx: WalletTransaction = {
+            id: walletTxId,
+            userId: user.id,
+            userEmail: user.email,
+            userName: user.name || user.email.split("@")[0],
+            type: "TRADE_INVEST",
+            amount: stake,
+            status: "APPROVED",
+            createdAt: startTimeISO,
+            balanceBefore: currAvail,
+            balanceAfter: newAvail,
+            referenceId: tradeId,
+            txDetails: `Solo Option (${tradeType}): ${assetPair} @ ${formatAssetPrice(entryPrice, assetPair)}`
+          };
+
+          // Atomic execution: balance cannot go negative under concurrent back-to-back trades
+          transaction.set(tradeRef, newSoloTrade);
+          transaction.set(walletTxRef, walletTx);
+          transaction.update(userRef, {
+            availableBalance: newAvail,
+            balance: newTotal
+          });
+        });
+
+        // Succeeded on this attempt
+        lastErr = null;
+        break;
+      } catch (tErr: any) {
+        lastErr = tErr;
+        const msg = (tErr?.message || "").toLowerCase();
+        const isContention =
+          msg.includes("stored version") ||
+          msg.includes("base version") ||
+          msg.includes("contention") ||
+          msg.includes("aborted") ||
+          msg.includes("failed-precondition");
+
+        if (isContention && attempt < 3) {
+          console.warn(`[Firestore Transaction Retry] Contention on user document (attempt ${attempt}/3). Retrying with backoff...`);
+          await new Promise((res) => setTimeout(res, 120 * attempt));
+          continue;
+        }
+        throw tErr;
       }
-      const user = userSnap.data() as UserProfile;
+    }
 
-      if (!isUserMobileVerified(user)) {
-        throw new Error("Mobile Verification Required! Trading is locked until your mobile number is verified. Please verify in Profile Settings.");
-      }
-
-      const currAvail = typeof user.availableBalance === "number" ? user.availableBalance : (typeof user.balance === "number" ? user.balance : 0);
-      if (currAvail < stake) {
-        throw new Error(`Insufficient Available Balance! You have ₹${Math.max(0, currAvail).toFixed(2)}, but tried to stake ₹${stake}.`);
-      }
-
-      const now = new Date();
-      const startTimeISO = clientStartTimeISO || now.toISOString();
-      const endTimeISO = clientEndTimeISO || new Date(now.getTime() + durationSeconds * 1000).toISOString();
-
-      let payoutPct = customPayoutPercentage && customPayoutPercentage > 0 ? customPayoutPercentage : 85;
-      const expectedPayout = stake + (stake * payoutPct) / 100;
-
-      const newSoloTrade: SoloTrade = {
-        id: tradeId,
-        userId: user.id,
-        userEmail: user.email,
-        userName: user.name || user.email.split("@")[0],
-        tradeType,
-        stake,
-        entryPrice,
-        exitPrice: null,
-        payoutPercentage: payoutPct,
-        expectedPayout,
-        profitOrLoss: null,
-        startTime: startTimeISO,
-        endTime: endTimeISO,
-        durationSeconds,
-        status: "RUNNING",
-        assetPair,
-        tradingSymbol,
-        drawRule: activeDrawRule,
-        txId: walletTxId
-      };
-
-      const newAvail = Math.max(0, currAvail - stake);
-      const currTotal = typeof user.balance === "number" ? user.balance : currAvail;
-      const newTotal = Math.max(0, currTotal - stake);
-      finalAvailBalance = newAvail;
-
-      const walletTx: WalletTransaction = {
-        id: walletTxId,
-        userId: user.id,
-        userEmail: user.email,
-        userName: user.name || user.email.split("@")[0],
-        type: "TRADE_INVEST",
-        amount: stake,
-        status: "APPROVED",
-        createdAt: startTimeISO,
-        balanceBefore: currAvail,
-        balanceAfter: newAvail,
-        referenceId: tradeId,
-        txDetails: `Solo Option (${tradeType}): ${assetPair} @ ${formatAssetPrice(entryPrice, assetPair)}`
-      };
-
-      // Atomic execution: balance cannot go negative under concurrent back-to-back trades
-      transaction.set(tradeRef, newSoloTrade);
-      transaction.set(walletTxRef, walletTx);
-      transaction.update(userRef, {
-        availableBalance: newAvail,
-        balance: newTotal
-      });
-    });
+    if (lastErr) throw lastErr;
 
     autoRejectInsufficientWithdrawals(userId, finalAvailBalance).catch((e) => {
       console.warn("Auto reject check error:", e);
@@ -3416,12 +3486,11 @@ export async function placeSoloTrade(
     console.log(`[Trade Transition] CREATED -> RUNNING: Trade ID ${tradeId} created with remaining balance ₹${finalAvailBalance}.`);
     return tradeId;
   } catch (err: any) {
-    console.error(`[Firestore Write Error / Trade Placement Failed] Trade ${tradeId}:`, err);
     if (typeof navigator !== "undefined" && !navigator.onLine) {
       throw new Error("⚠️ Internet Disconnected: Cannot place trade while offline. Please reconnect to the internet.");
     }
     const errMsg = (err?.message || "").toLowerCase();
-    if (
+    const isRecoverableContentionOrQuota =
       errMsg.includes("quota limit exceeded") ||
       errMsg.includes("quota") ||
       errMsg.includes("firestore.googleapis.com") ||
@@ -3433,9 +3502,10 @@ export async function placeSoloTrade(
       errMsg.includes("does not match") ||
       errMsg.includes("aborted") ||
       errMsg.includes("failed-precondition") ||
-      errMsg.includes("contention")
-    ) {
-      console.warn("Firestore contention or quota limit hit during placeSoloTrade. Executing trade in local fallback mode...", err);
+      errMsg.includes("contention");
+
+    if (isRecoverableContentionOrQuota) {
+      console.warn(`[Firestore Contention / Local Fallback] Trade ${tradeId}: running in local mode (${err?.message})`);
 
       let localUser: UserProfile | null = null;
       try {
@@ -3482,7 +3552,8 @@ export async function placeSoloTrade(
       try {
         const existingSolo = localStorage.getItem(`solo_trades_${userId}`);
         const parsed: SoloTrade[] = existingSolo ? JSON.parse(existingSolo) : [];
-        const updated = [fallbackSoloTrade, ...parsed];
+        const filtered = parsed.filter((t) => t.id !== tradeId);
+        const updated = [fallbackSoloTrade, ...filtered];
         localStorage.setItem(`solo_trades_${userId}`, JSON.stringify(updated));
       } catch {}
 
@@ -3506,6 +3577,7 @@ export async function placeSoloTrade(
       return tradeId;
     }
 
+    console.error(`[Firestore Write Error / Trade Placement Failed] Trade ${tradeId}:`, err);
     if (errMsg.includes("project_number") || errMsg.includes("firestore")) {
       throw new Error("⚡ System is temporarily busy. Please try again shortly.");
     }
@@ -3645,7 +3717,13 @@ export async function settleSoloTrade(
       const settledIso = new Date().toISOString();
       const userRef = doc(db, "users", trade.userId);
 
-      // 1. Atomically update trade status inside transaction
+      // Step 1: Execute ALL reads before any writes (Firestore Transaction Mandate)
+      let uSnap: any = null;
+      if (finalPayout > 0) {
+        uSnap = await transaction.get(userRef);
+      }
+
+      // Step 2: Execute ALL writes after reads have completed
       transaction.update(tradeRef, {
         status: finalOutcome,
         exitPrice: exit,
@@ -3653,18 +3731,14 @@ export async function settleSoloTrade(
         settledAt: settledIso
       });
 
-      // 2. Atomically update user balance ONLY IF finalPayout > 0
-      if (finalPayout > 0) {
-        const uSnap = await transaction.get(userRef);
-        if (uSnap.exists()) {
-          const u = uSnap.data() as UserProfile;
-          const currAvail = Math.max(0, u.availableBalance ?? u.balance ?? 0);
-          const currBal = Math.max(0, u.balance ?? currAvail);
-          transaction.update(userRef, {
-            availableBalance: currAvail + finalPayout,
-            balance: currBal + finalPayout
-          });
-        }
+      if (finalPayout > 0 && uSnap && uSnap.exists()) {
+        const u = uSnap.data() as UserProfile;
+        const currAvail = Math.max(0, u.availableBalance ?? u.balance ?? 0);
+        const currBal = Math.max(0, u.balance ?? currAvail);
+        transaction.update(userRef, {
+          availableBalance: currAvail + finalPayout,
+          balance: currBal + finalPayout
+        });
 
         const settleTxId = "tx_solo_set_" + Date.now() + "_" + Math.floor(Math.random() * 100000);
         const settleTxRef = doc(db, "wallet_transactions", settleTxId);
@@ -3725,23 +3799,25 @@ export function autoSettleExpiredTrades(trades: SoloTrade[]) {
  * Deduplicate local fallback trades against remote Firestore trades
  */
 function deduplicateSoloTrades(remoteList: SoloTrade[], localList: SoloTrade[]): SoloTrade[] {
-  const result: SoloTrade[] = [...remoteList];
-  const remoteIds = new Set(remoteList.map((r) => r.id));
+  const seenIds = new Set<string>();
+  const result: SoloTrade[] = [];
 
+  // Add remote trades first with ID uniqueness guarantee
+  remoteList.forEach((remote) => {
+    if (remote && remote.id && !seenIds.has(remote.id)) {
+      seenIds.add(remote.id);
+      result.push(remote);
+    }
+  });
+
+  // Add in-flight local trades only if ID hasn't been seen yet
   localList.forEach((local) => {
-    if (remoteIds.has(local.id)) return;
+    if (!local || !local.id || seenIds.has(local.id)) return;
 
-    // Check if a matching remote trade exists (same user, symbol, type, stake, within 15s)
-    const existsByFuzzy = remoteList.some((remote) => {
-      const isSameUser = remote.userId === local.userId;
-      const isSameSymbol = (remote.tradingSymbol || remote.assetPair) === (local.tradingSymbol || local.assetPair);
-      const isSameType = remote.tradeType === local.tradeType;
-      const isSameStake = Math.abs(remote.stake - local.stake) < 0.01;
-      const timeDiff = Math.abs(new Date(remote.startTime).getTime() - new Date(local.startTime).getTime());
-      return isSameUser && isSameSymbol && isSameType && isSameStake && timeDiff < 15000;
-    });
-
-    if (!existsByFuzzy) {
+    const isRunning = local.status === "RUNNING";
+    const isRecent = local.startTime && (Date.now() - new Date(local.startTime).getTime() < 180000);
+    if (isRunning || isRecent) {
+      seenIds.add(local.id);
       result.push(local);
     }
   });

@@ -1556,38 +1556,164 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
         renderDrawing(ctx, drawingInProgressRef.current, transformRef.current, true);
       }
 
-      // 6. Active Trades Overlay
+      // 6. Active Trades Overlay with Real-time Trade Expiry Mini Countdown Timer
       const currentTrades = matchingActiveTradesRef.current;
       if (showActiveTrades && currentTrades.length > 0) {
+        const nowMs = Date.now();
         currentTrades.forEach((trade) => {
           const entryY = getY(trade.entryPrice);
           const isWin =
             (trade.tradeType === "CALL" && activeDrawPrice > trade.entryPrice) ||
             (trade.tradeType === "PUT" && activeDrawPrice < trade.entryPrice);
 
-          ctx.strokeStyle = trade.tradeType === "CALL" ? quotexGreen : quotexRed;
+          // Calculate precise real-time countdown to trade expiry
+          const endTimeMs = new Date(trade.endTime).getTime();
+          const remainingSec = Math.max(0, Math.ceil((endTimeMs - nowMs) / 1000));
+          const mins = Math.floor(remainingSec / 60).toString().padStart(2, "0");
+          const secs = (remainingSec % 60).toString().padStart(2, "0");
+          const tradeTimerString = `${mins}:${secs}`;
+          const isUrgent = remainingSec <= 5;
+
+          const tradeColor = trade.tradeType === "CALL" ? quotexGreen : quotexRed;
+
+          // 6a. Single Unified Minimized Tag Setup (No separate nested cards)
+          const dirIcon = trade.tradeType === "CALL" ? "▲" : "▼";
+          const dirText = `${dirIcon} ${trade.tradeType} ₹${trade.stake}`;
+          const timerText = `⏱ ${tradeTimerString}`;
+          const statusText = isWin ? "+ITM" : "-OTM";
+
+          ctx.font = "bold 9px JetBrains Mono, monospace";
+          const dirMeasured = ctx.measureText(dirText).width;
+          const sec1W = Math.max(50, Math.ceil(dirMeasured + 6));
+          const sec2W = 46;
+          const sec3W = 34;
+          const tagW = sec1W + sec2W + sec3W;
+          const tagH = 19;
+          const tagX = Math.max(8, chartWidth - tagW - 14);
+          const tagY = Math.max(10, Math.min(chartHeight - 10, entryY)) - tagH / 2;
+
+          // Draw horizontal dashed entry ray up to tag
+          ctx.strokeStyle = tradeColor;
           ctx.setLineDash([4, 4]);
-          ctx.lineWidth = 1.6;
+          ctx.lineWidth = 1.4;
           ctx.beginPath();
           ctx.moveTo(0, entryY);
-          ctx.lineTo(chartWidth, entryY);
+          ctx.lineTo(tagX, entryY);
           ctx.stroke();
           ctx.setLineDash([]);
 
-          const tagBg = trade.tradeType === "CALL" ? "#064E3B" : "#881337";
-          const tagBorder = trade.tradeType === "CALL" ? quotexGreen : quotexRed;
-          ctx.fillStyle = tagBg;
-          ctx.strokeStyle = tagBorder;
-          ctx.lineWidth = 1;
-          ctx.fillRect(chartWidth - 110, entryY - 10, 105, 20);
-          ctx.strokeRect(chartWidth - 110, entryY - 10, 105, 20);
+          // Solid connector from tag right side to axis
+          ctx.beginPath();
+          ctx.moveTo(tagX + tagW, entryY);
+          ctx.lineTo(chartWidth, entryY);
+          ctx.stroke();
 
-          ctx.fillStyle = "#FFFFFF";
+          // 6b. Vertical Trade Expiration Marker Line (Quotex / PocketOption Style)
+          if (visibleCandles.length > 0) {
+            const lastCandle = visibleCandles[visibleCandles.length - 1];
+            if (lastCandle) {
+              const lastX = (visibleCandles.length - 1) * candleWidth + candleWidth / 2;
+              const timeDiffSec = (endTimeMs - lastCandle.time) / 1000;
+              const slotsAhead = timeDiffSec / timeframeSec;
+              const expiryX = lastX + slotsAhead * candleWidth;
+              if (expiryX > 0 && expiryX <= chartWidth) {
+                ctx.strokeStyle = isUrgent ? "rgba(239, 68, 68, 0.7)" : "rgba(245, 158, 11, 0.5)";
+                ctx.setLineDash([3, 3]);
+                ctx.lineWidth = 1.2;
+                ctx.beginPath();
+                ctx.moveTo(expiryX, 0);
+                ctx.lineTo(expiryX, chartHeight);
+                ctx.stroke();
+                ctx.setLineDash([]);
+              }
+            }
+          }
+
+          // 6c. Single Unified Minimized Pill (All 3 items inside ONE card)
+          ctx.save();
+          ctx.shadowColor = "rgba(0, 0, 0, 0.35)";
+          ctx.shadowBlur = 4;
+          ctx.shadowOffsetY = 1;
+
+          ctx.fillStyle = isDark ? "#0B0E14" : "#0F172A";
+          ctx.strokeStyle = tradeColor;
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          if (ctx.roundRect) {
+            ctx.roundRect(tagX, tagY, tagW, tagH, 4);
+          } else {
+            ctx.rect(tagX, tagY, tagW, tagH);
+          }
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+
+          // 1. Direction & Stake Text
+          ctx.fillStyle = trade.tradeType === "CALL" ? "#34D399" : "#F87171";
           ctx.font = "bold 9px JetBrains Mono, monospace";
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          const tradeDir = trade.tradeType === "CALL" ? "▲ CALL" : "▼ PUT";
-          ctx.fillText(`${tradeDir} ₹${trade.stake} (${isWin ? "+ITM" : "-OTM"})`, chartWidth - 58, entryY);
+          ctx.fillText(dirText, tagX + sec1W / 2, tagY + tagH / 2);
+
+          // Divider 1
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.16)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(tagX + sec1W, tagY + 2.5);
+          ctx.lineTo(tagX + sec1W, tagY + tagH - 2.5);
+          ctx.stroke();
+
+          // 2. Center Real-time Expiry Countdown Timer
+          ctx.fillStyle = isUrgent ? "#EF4444" : "#FBBF24";
+          ctx.font = "bold 9px JetBrains Mono, monospace";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(timerText, tagX + sec1W + sec2W / 2, tagY + tagH / 2);
+
+          // Divider 2
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.16)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(tagX + sec1W + sec2W, tagY + 2.5);
+          ctx.lineTo(tagX + sec1W + sec2W, tagY + tagH - 2.5);
+          ctx.stroke();
+
+          // 3. Status (+ITM / -OTM)
+          ctx.fillStyle = isWin ? quotexGreen : quotexRed;
+          ctx.font = "bold 9px JetBrains Mono, monospace";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(statusText, tagX + sec1W + sec2W + sec3W / 2, tagY + tagH / 2);
+
+          // 6d. Beacon Anchor at Chart Right Boundary
+          ctx.fillStyle = tradeColor;
+          ctx.beginPath();
+          ctx.arc(chartWidth - 2, entryY, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = "#FFFFFF";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+
+          // 6e. Right-Axis Entry Price Pill (Directly on Price Axis)
+          const axisPillW = pillWidth;
+          const axisPillH = 18;
+          const axisPillX = chartWidth;
+          const axisPillY = Math.max(10, Math.min(chartHeight - 10, entryY));
+
+          ctx.fillStyle = tradeColor;
+          ctx.beginPath();
+          if (ctx.roundRect) {
+            ctx.roundRect(axisPillX, axisPillY - axisPillH / 2, axisPillW, axisPillH, 2);
+          } else {
+            ctx.rect(axisPillX, axisPillY - axisPillH / 2, axisPillW, axisPillH);
+          }
+          ctx.fill();
+
+          ctx.fillStyle = "#FFFFFF";
+          ctx.font = "bold 9px JetBrains Mono, monospace";
+          ctx.textAlign = "right";
+          ctx.textBaseline = "middle";
+          ctx.fillText(formatAssetPrice(trade.entryPrice, currentSymbol, decimals), width - 1, axisPillY);
         });
       }
 

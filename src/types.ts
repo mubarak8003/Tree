@@ -521,6 +521,7 @@ export interface MarketAsset {
 export interface SoloTradingConfig {
   isEnabled: boolean; // Admin toggle: if false, user cannot place solo trades
   showPatternRadar?: boolean; // Admin toggle: if false, the "⚡ Pattern Radar" button is hidden from users
+  showActiveTradesStrip?: boolean; // Admin toggle: if false, the active trade strip (Stake, Entry, Return, Countdown timer) under the chart is hidden from users
   defaultPayoutPercentage: number; // e.g. 85
   protectedPayoutPercentage?: number; // e.g. 80 (payout % for Protected Mode)
   standardPayoutPercentage?: number; // e.g. 85 (payout % for Standard Mode)

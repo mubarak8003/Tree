@@ -201,6 +201,24 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
     }
   };
 
+  // Active Trades Position Strip (Stake, Entry, Return, Countdown Timer) Toggle Handler
+  const handleToggleActiveTradesStrip = async () => {
+    const isCurrentlyVisible = config.showActiveTradesStrip !== false;
+    const nextState = !isCurrentlyVisible;
+    try {
+      await saveSoloTradingConfig({ showActiveTradesStrip: nextState });
+      setConfig((prev) => ({ ...prev, showActiveTradesStrip: nextState }));
+      onTriggerNotification?.(
+        nextState 
+          ? "Active Trade Position Strip (Stake / Entry / Return) is now VISIBLE to traders." 
+          : "Active Trade Position Strip (Stake / Entry / Return) is now HIDDEN from traders.",
+        nextState ? "success" : "info"
+      );
+    } catch (err: any) {
+      onTriggerNotification?.(err.message || "Failed to toggle Active Trade Position Strip visibility", "error");
+    }
+  };
+
   // Save Rules
   const handleSaveRules = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -844,23 +862,23 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
   }, [filteredAuditTrades, auditPage, auditRowsPerPage]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-w-full overflow-hidden">
       {/* 1. Solo Binary Options Engine Master Switch Banner */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-        <div className="flex items-start gap-3.5">
-          <div className={`p-3 rounded-2xl ${
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-6 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4 max-w-full overflow-hidden">
+        <div className="flex items-start gap-3 sm:gap-3.5 min-w-0 flex-1 w-full">
+          <div className={`p-2.5 sm:p-3 rounded-2xl shrink-0 ${
             config.isEnabled 
               ? "bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400" 
               : "bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400"
           }`}>
-            <Power className="h-7 w-7" />
+            <Power className="h-6 w-6 sm:h-7 sm:w-7" />
           </div>
-          <div>
-            <div className="flex items-center gap-2.5 flex-wrap">
-              <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100 break-words">
                 Solo Binary Options Engine Master Switch
               </h3>
-              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold tracking-wide uppercase ${
+              <span className={`px-2.5 py-0.5 rounded-full text-[10px] sm:text-[11px] font-extrabold tracking-wide uppercase ${
                 config.isEnabled 
                   ? "bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800" 
                   : "bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800"
@@ -877,7 +895,7 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
         <button
           type="button"
           onClick={handleToggleMasterSwitch}
-          className={`px-5 py-2.5 rounded-2xl text-xs font-extrabold tracking-wide uppercase transition-all shadow-md flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+          className={`w-full md:w-auto px-4 sm:px-5 py-2.5 rounded-2xl text-xs font-extrabold tracking-wide uppercase transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer shrink-0 ${
             config.isEnabled
               ? "bg-rose-600 hover:bg-rose-700 text-white"
               : "bg-emerald-600 hover:bg-emerald-700 text-white"
@@ -888,22 +906,22 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
         </button>
       </div>
 
-      {/* 2. Feature Visibility & Pattern Radar Toggle */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-        <div className="flex items-start gap-3.5">
-          <div className={`p-3 rounded-2xl ${
+      {/* 2. Feature Visibility: Pattern Radar */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-6 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4 max-w-full overflow-hidden">
+        <div className="flex items-start gap-3 sm:gap-3.5 min-w-0 flex-1 w-full">
+          <div className={`p-2.5 sm:p-3 rounded-2xl shrink-0 ${
             config.showPatternRadar !== false 
               ? "bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400" 
               : "bg-slate-100 dark:bg-slate-800 text-slate-400"
           }`}>
-            <Sparkles className="h-7 w-7" />
+            <Sparkles className="h-6 w-6 sm:h-7 sm:w-7" />
           </div>
-          <div>
-            <div className="flex items-center gap-2.5 flex-wrap">
-              <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100 break-words">
                 Pattern Radar Visibility
               </h3>
-              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold tracking-wide uppercase ${
+              <span className={`px-2.5 py-0.5 rounded-full text-[10px] sm:text-[11px] font-extrabold tracking-wide uppercase ${
                 config.showPatternRadar !== false 
                   ? "bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800" 
                   : "bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700"
@@ -920,7 +938,7 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
         <button
           type="button"
           onClick={handleTogglePatternRadar}
-          className={`px-5 py-2.5 rounded-2xl text-xs font-extrabold tracking-wide uppercase transition-all shadow-md flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+          className={`w-full md:w-auto px-4 sm:px-5 py-2.5 rounded-2xl text-xs font-extrabold tracking-wide uppercase transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer shrink-0 ${
             config.showPatternRadar !== false
               ? "bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 text-white"
               : "bg-amber-600 hover:bg-amber-700 text-white"
@@ -935,6 +953,85 @@ export const SoloTradingTab: React.FC<SoloTradingTabProps> = ({
             <>
               <Eye className="h-4 w-4" />
               SHOW PATTERN RADAR
+            </>
+          )}
+        </button>
+      </div>
+
+      {/* 2B. Feature Visibility: Active Trades Strip / Live Position Widget (Stake / Entry / Return Banner) */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-6 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4 max-w-full overflow-hidden">
+        <div className="flex items-start gap-3 sm:gap-3.5 min-w-0 flex-1 w-full">
+          <div className={`p-2.5 sm:p-3 rounded-2xl shrink-0 ${
+            config.showActiveTradesStrip !== false 
+              ? "bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400" 
+              : "bg-slate-100 dark:bg-slate-800 text-slate-400"
+          }`}>
+            <Clock className="h-6 w-6 sm:h-7 sm:w-7" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100 break-words">
+                Active Trade Position Strip (Stake / Entry / Return Widget)
+              </h3>
+              <span className={`px-2.5 py-0.5 rounded-full text-[10px] sm:text-[11px] font-extrabold tracking-wide uppercase ${
+                config.showActiveTradesStrip !== false 
+                  ? "bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800" 
+                  : "bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700"
+              }`}>
+                {config.showActiveTradesStrip !== false ? "VISIBLE TO USERS" : "HIDDEN FROM USERS"}
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-1">
+              Admin controls whether the horizontal active trade position banner below the chart (showing <strong>Stake, Entry price, Return & Countdown timer pill</strong>) is shown to traders.
+            </p>
+
+            {/* Visual mini-preview chip with responsive scroll container so it NEVER breaks mobile screen boundaries */}
+            <div className="mt-3 max-w-full overflow-x-auto no-scrollbar py-0.5">
+              <div className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-[10px] sm:text-[11px] font-mono shadow-xs whitespace-nowrap">
+                <div className="w-4 h-4 sm:w-5 sm:h-5 rounded-full bg-rose-500 text-white flex items-center justify-center text-[10px] font-bold shrink-0 shadow-xs">
+                  <TrendingDown className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
+                </div>
+                <div className="flex items-center gap-1 sm:gap-1.5 font-bold">
+                  <span className="text-slate-500 dark:text-slate-400 font-medium text-[9px] sm:text-[10px]">Stake:</span>
+                  <span className="text-slate-900 dark:text-white">₹5.00</span>
+                  <span className="text-slate-300 dark:text-slate-600 font-normal">|</span>
+                  <span className="text-slate-500 dark:text-slate-400 font-medium text-[9px] sm:text-[10px]">Entry:</span>
+                  <span className="text-amber-600 dark:text-amber-400">102.81</span>
+                </div>
+                <div className="flex items-center gap-1 font-bold">
+                  <span className="text-slate-500 dark:text-slate-400 font-medium text-[9px] sm:text-[10px]">Return:</span>
+                  <span className="text-rose-600 dark:text-rose-400">₹0.00</span>
+                  <span className="px-1 py-0.2 rounded text-[8px] sm:text-[9px] font-extrabold bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/30">
+                    -₹5
+                  </span>
+                </div>
+                <div className="px-1.5 sm:px-2 py-0.5 bg-slate-200 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-indigo-600 dark:text-indigo-400 font-extrabold text-[9px] sm:text-[10px] flex items-center gap-1">
+                  <Clock className="h-2.5 w-2.5 sm:h-3 sm:w-3 animate-pulse" />
+                  00:10
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleToggleActiveTradesStrip}
+          className={`w-full md:w-auto px-4 sm:px-5 py-2.5 rounded-2xl text-xs font-extrabold tracking-wide uppercase transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer shrink-0 ${
+            config.showActiveTradesStrip !== false
+              ? "bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 text-white"
+              : "bg-emerald-600 hover:bg-emerald-700 text-white"
+          }`}
+        >
+          {config.showActiveTradesStrip !== false ? (
+            <>
+              <EyeOff className="h-4 w-4" />
+              HIDE ACTIVE TRADES STRIP
+            </>
+          ) : (
+            <>
+              <Eye className="h-4 w-4" />
+              SHOW ACTIVE TRADES STRIP
             </>
           )}
         </button>

@@ -583,6 +583,13 @@ async function autoSettleExpiredSoloTradesServer() {
             const settledIso = new Date().toISOString();
             const userRef = doc(db, "users", currentTrade.userId);
 
+            // Step 1: Execute ALL reads before any writes (Firestore Transaction Rule)
+            let uSnap = null;
+            if (finalPayout > 0) {
+              uSnap = await transaction.get(userRef);
+            }
+
+            // Step 2: Execute ALL writes
             transaction.update(tradeRef, {
               status: finalOutcome,
               exitPrice: exit,
@@ -590,17 +597,14 @@ async function autoSettleExpiredSoloTradesServer() {
               settledAt: settledIso
             });
 
-            if (finalPayout > 0) {
-              const uSnap = await transaction.get(userRef);
-              if (uSnap.exists()) {
-                const uData = uSnap.data();
-                const currAvail = Math.max(0, uData?.availableBalance ?? uData?.balance ?? 0);
-                const currBal = Math.max(0, uData?.balance ?? currAvail);
-                transaction.update(userRef, {
-                  availableBalance: currAvail + finalPayout,
-                  balance: currBal + finalPayout
-                });
-              }
+            if (finalPayout > 0 && uSnap && uSnap.exists()) {
+              const uData = uSnap.data();
+              const currAvail = Math.max(0, uData?.availableBalance ?? uData?.balance ?? 0);
+              const currBal = Math.max(0, uData?.balance ?? currAvail);
+              transaction.update(userRef, {
+                availableBalance: currAvail + finalPayout,
+                balance: currBal + finalPayout
+              });
 
               const settleTxId = "tx_solo_set_" + Date.now() + "_" + Math.floor(Math.random() * 100000);
               const settleTxRef = doc(db, "wallet_transactions", settleTxId);

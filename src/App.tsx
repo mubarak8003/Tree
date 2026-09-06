@@ -86,7 +86,9 @@ import {
   Check,
   Smartphone,
   ArrowRight,
-  UserPlus
+  UserPlus,
+  CheckCircle2,
+  AlertCircle
 } from "lucide-react";
 
 interface LoginSession {
@@ -872,28 +874,38 @@ export default function App() {
         {notification && (
           <div 
             id="toast-notification"
-            className={`fixed bottom-6 right-6 z-50 flex items-center gap-2.5 px-4.5 py-3 rounded-xl border shadow-lg transition-all duration-300 animate-slide-in ${
+            className={`fixed top-3 sm:top-4 inset-x-0 mx-auto w-fit max-w-[94vw] sm:max-w-md z-[99999] pointer-events-auto flex items-center gap-3 px-4 py-2.5 rounded-2xl shadow-2xl backdrop-blur-xl border transition-all duration-300 animate-slide-down ${
               notification.type === "success"
-                ? "bg-emerald-50 dark:bg-emerald-950 border-emerald-200 dark:border-emerald-900 text-emerald-800 dark:text-emerald-400"
+                ? "bg-slate-900/95 text-white border-emerald-500/60 shadow-emerald-500/20"
                 : notification.type === "error"
-                ? "bg-rose-50 dark:bg-rose-950 border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-400"
-                : "bg-indigo-50 dark:bg-indigo-950 border-indigo-200 dark:border-indigo-900 text-indigo-800 dark:text-indigo-400"
+                ? "bg-slate-900/95 text-white border-rose-500/60 shadow-rose-500/20"
+                : "bg-slate-900/95 text-white border-indigo-500/60 shadow-indigo-500/20"
             }`}
           >
-            <div className="rounded-full p-1 bg-white/80 dark:bg-slate-900">
-              <Sparkles className={`h-4 w-4 ${
-                notification.type === "success" 
-                  ? "text-emerald-600" 
-                  : notification.type === "error" 
-                  ? "text-rose-600" 
-                  : "text-indigo-600"
-              }`} />
+            <div className={`p-1.5 rounded-xl shrink-0 flex items-center justify-center ${
+              notification.type === "success" 
+                ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" 
+                : notification.type === "error" 
+                ? "bg-rose-500/20 text-rose-400 border border-rose-500/30" 
+                : "bg-indigo-500/20 text-indigo-400 border border-indigo-500/30"
+            }`}>
+              {notification.type === "success" ? (
+                <CheckCircle2 className="h-4 w-4" />
+              ) : notification.type === "error" ? (
+                <AlertCircle className="h-4 w-4" />
+              ) : (
+                <Sparkles className="h-4 w-4" />
+              )}
             </div>
-            <span className="text-xs font-semibold">{notification.message}</span>
+            <div className="flex-1 min-w-0 pr-1">
+              <span className="text-xs sm:text-[13px] font-semibold tracking-tight text-slate-100 block leading-tight">
+                {notification.message}
+              </span>
+            </div>
             <button
               type="button"
               onClick={() => setNotification(null)}
-              className="ml-2 p-1 rounded-lg hover:bg-black/10 dark:hover:bg-white/10 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+              className="p-1 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition-colors shrink-0 cursor-pointer"
               title="Close notification"
             >
               <X className="h-3.5 w-3.5" />
@@ -914,32 +926,42 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-100/70 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans antialiased flex flex-col selection:bg-indigo-500 selection:text-white transition-colors duration-200">
       
-      {/* Toast Notification */}
+      {/* Sleek Dynamic Island / Pro Trading Toast Notification */}
       {notification && (
         <div 
           id="toast-notification"
-          className={`fixed bottom-6 right-6 z-50 flex items-center gap-2.5 px-4.5 py-3 rounded-xl border shadow-lg transition-all duration-300 animate-slide-in ${
+          className={`fixed top-3 sm:top-4 inset-x-0 mx-auto w-fit max-w-[94vw] sm:max-w-md z-[99999] pointer-events-auto flex items-center gap-3 px-4 py-2.5 rounded-2xl shadow-2xl backdrop-blur-xl border transition-all duration-300 animate-slide-down ${
             notification.type === "success"
-              ? "bg-emerald-50 dark:bg-emerald-950 border-emerald-200 dark:border-emerald-900 text-emerald-800 dark:text-emerald-400"
+              ? "bg-slate-900/95 text-white border-emerald-500/60 shadow-emerald-500/20"
               : notification.type === "error"
-              ? "bg-rose-50 dark:bg-rose-950 border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-400"
-              : "bg-indigo-50 dark:bg-indigo-950 border-indigo-200 dark:border-indigo-900 text-indigo-800 dark:text-indigo-400"
+              ? "bg-slate-900/95 text-white border-rose-500/60 shadow-rose-500/20"
+              : "bg-slate-900/95 text-white border-indigo-500/60 shadow-indigo-500/20"
           }`}
         >
-          <div className="rounded-full p-1 bg-white/80 dark:bg-slate-900">
-            <Sparkles className={`h-4 w-4 ${
-              notification.type === "success" 
-                ? "text-emerald-600" 
-                : notification.type === "error" 
-                ? "text-rose-600" 
-                : "text-indigo-600"
-            }`} />
+          <div className={`p-1.5 rounded-xl shrink-0 flex items-center justify-center ${
+            notification.type === "success" 
+              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" 
+              : notification.type === "error" 
+              ? "bg-rose-500/20 text-rose-400 border border-rose-500/30" 
+              : "bg-indigo-500/20 text-indigo-400 border border-indigo-500/30"
+          }`}>
+            {notification.type === "success" ? (
+              <CheckCircle2 className="h-4 w-4" />
+            ) : notification.type === "error" ? (
+              <AlertCircle className="h-4 w-4" />
+            ) : (
+              <Sparkles className="h-4 w-4" />
+            )}
           </div>
-          <span className="text-xs font-semibold">{notification.message}</span>
+          <div className="flex-1 min-w-0 pr-1">
+            <span className="text-xs sm:text-[13px] font-semibold tracking-tight text-slate-100 block leading-tight">
+              {notification.message}
+            </span>
+          </div>
           <button
             type="button"
             onClick={() => setNotification(null)}
-            className="ml-2 p-1 rounded-lg hover:bg-black/10 dark:hover:bg-white/10 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors cursor-pointer"
+            className="p-1 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition-colors shrink-0 cursor-pointer"
             title="Close notification"
           >
             <X className="h-3.5 w-3.5" />
