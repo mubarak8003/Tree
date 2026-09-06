@@ -60,8 +60,41 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
   onTriggerNotification,
   onUpdateProfile
 }) => {
-  // Single Unified Balance from currentUser (Firestore single source of truth)
-  const availableBalance = currentUser ? Math.max(0, currentUser.availableBalance ?? currentUser.balance ?? 0) : 0;
+  // Single Unified Atomic Balance with In-Flight Operation Guarding (Eliminates balance up/down flicker on rapid trades and wins)
+  const initialBal = currentUser ? Math.max(0, currentUser.availableBalance ?? currentUser.balance ?? 0) : 0;
+  const [localLiveBalance, setLocalLiveBalance] = useState<number>(initialBal);
+  const liveBalanceRef = useRef<number>(initialBal);
+  const inFlightOperationsRef = useRef<number>(0);
+  const lastInFlightActionTimeRef = useRef<number>(0);
+  const prevUserIdRef = useRef<string | undefined>(currentUser?.id);
+
+  // Sync with currentUser prop whenever user changes or when no trade operations are in flight
+  useEffect(() => {
+    if (!currentUser) return;
+    const remote = Math.max(0, currentUser.availableBalance ?? currentUser.balance ?? 0);
+
+    // If userId changed, hard reset balance to the new user immediately
+    if (currentUser.id !== prevUserIdRef.current) {
+      prevUserIdRef.current = currentUser.id;
+      inFlightOperationsRef.current = 0;
+      lastInFlightActionTimeRef.current = 0;
+      liveBalanceRef.current = remote;
+      setLocalLiveBalance(remote);
+      return;
+    }
+
+    // When no local trade actions or settlements are in flight, and at least 2000ms have passed since the last action,
+    // synchronize from authoritative Firestore remote balance
+    const timeSinceLastAction = Date.now() - lastInFlightActionTimeRef.current;
+    if (inFlightOperationsRef.current === 0 && timeSinceLastAction > 2000) {
+      if (Math.abs(liveBalanceRef.current - remote) > 0.001) {
+        liveBalanceRef.current = remote;
+        setLocalLiveBalance(remote);
+      }
+    }
+  }, [currentUser?.availableBalance, currentUser?.balance, currentUser?.id]);
+
+  const availableBalance = localLiveBalance;
 
   // Track internet connectivity status
   const [isOnline, setIsOnline] = useState<boolean>(() => typeof navigator !== "undefined" ? navigator.onLine : true);
@@ -438,15 +471,21 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
             return updated;
           });
 
-          // 2. Settlement payout is credited immediately to user profile in 0ms
-          if (payout > 0 && currentUser && onUpdateProfile) {
-            const curAvail = currentUser.availableBalance ?? currentUser.balance ?? 0;
-            const curBal = currentUser.balance ?? curAvail;
-            onUpdateProfile({
-              ...currentUser,
-              availableBalance: curAvail + payout,
-              balance: curBal + payout
-            });
+          // 2. Settlement payout is credited immediately to user profile in 0ms (atomic, zero flicker)
+          if (payout > 0 && currentUser) {
+            inFlightOperationsRef.current += 1;
+            lastInFlightActionTimeRef.current = Date.now();
+            const nextAvail = liveBalanceRef.current + payout;
+            liveBalanceRef.current = nextAvail;
+            setLocalLiveBalance(nextAvail);
+
+            if (onUpdateProfile) {
+              onUpdateProfile({
+                ...currentUser,
+                availableBalance: nextAvail,
+                balance: nextAvail
+              });
+            }
           }
 
           // Trigger outcome notification:
@@ -468,7 +507,17 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
 
           // 3. Sync to Firestore in background asynchronously
           settleSoloTrade(trade.id, currentExitPrice)
+            .then(() => {
+              if (payout > 0) {
+                inFlightOperationsRef.current = Math.max(0, inFlightOperationsRef.current - 1);
+                lastInFlightActionTimeRef.current = Date.now();
+              }
+            })
             .catch((err) => {
+              if (payout > 0) {
+                inFlightOperationsRef.current = Math.max(0, inFlightOperationsRef.current - 1);
+                lastInFlightActionTimeRef.current = Date.now();
+              }
               console.error(`[Background Firestore Settle Error] Trade ${trade.id}:`, err);
             })
             .finally(() => {
@@ -601,7 +650,7 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
       return;
     }
 
-    const currentRemaining = availableBalance;
+    const currentRemaining = liveBalanceRef.current;
     if (parsedStake > currentRemaining) {
       setOrderError(`Insufficient Available Balance (₹${currentRemaining.toFixed(2)}). Cannot place trade.`);
       if (onTriggerNotification) {
@@ -613,15 +662,20 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
     // Play instant sound feedback
     playTradeExecutionSound(targetType);
 
-    // Optimistically deduct exact stake amount once across header badge and trading desk
-    const preTradeAvail = availableBalance;
-    const preTradeTotal = currentUser.balance ?? availableBalance;
+    // Track this in-flight operation and update timestamp
+    inFlightOperationsRef.current += 1;
+    lastInFlightActionTimeRef.current = Date.now();
+
+    // Optimistically deduct exact stake amount atomically from live balance (atomic, zero flicker)
+    const nextAvail = Math.max(0, liveBalanceRef.current - parsedStake);
+    liveBalanceRef.current = nextAvail;
+    setLocalLiveBalance(nextAvail);
+
     if (currentUser && onUpdateProfile) {
-      const nextAvail = Math.max(0, preTradeAvail - parsedStake);
       onUpdateProfile({
         ...currentUser,
         availableBalance: nextAvail,
-        balance: Math.max(0, preTradeTotal - parsedStake)
+        balance: nextAvail
       });
     }
 
@@ -690,24 +744,35 @@ export const SoloTradingEngine: React.FC<SoloTradingEngineProps> = ({
       endTimeISO,
       selectedDrawRule,
       deterministicTradeId
-    ).catch((err: any) => {
-      console.error("[Instant Trade Execution Error]:", err);
-      const sanitized = sanitizeErrorMessage(err, "Failed to execute solo trade.");
-      setOrderError(sanitized);
-      if (onTriggerNotification) {
-        onTriggerNotification(sanitized, "error");
-      }
-      setUserTrades((prev) => prev.filter((t) => t.id !== deterministicTradeId));
+    )
+      .then(() => {
+        inFlightOperationsRef.current = Math.max(0, inFlightOperationsRef.current - 1);
+        lastInFlightActionTimeRef.current = Date.now();
+      })
+      .catch((err: any) => {
+        inFlightOperationsRef.current = Math.max(0, inFlightOperationsRef.current - 1);
+        lastInFlightActionTimeRef.current = Date.now();
+        console.error("[Instant Trade Execution Error]:", err);
+        const sanitized = sanitizeErrorMessage(err, "Failed to execute solo trade.");
+        setOrderError(sanitized);
+        if (onTriggerNotification) {
+          onTriggerNotification(sanitized, "error");
+        }
+        setUserTrades((prev) => prev.filter((t) => t.id !== deterministicTradeId));
 
-      // Revert optimistic profile balance if trade placement was rejected
-      if (currentUser && onUpdateProfile) {
-        onUpdateProfile({
-          ...currentUser,
-          availableBalance: preTradeAvail,
-          balance: preTradeTotal
-        });
-      }
-    });
+        // Revert optimistic profile balance if trade placement was rejected
+        const refundedAvail = liveBalanceRef.current + parsedStake;
+        liveBalanceRef.current = refundedAvail;
+        setLocalLiveBalance(refundedAvail);
+
+        if (currentUser && onUpdateProfile) {
+          onUpdateProfile({
+            ...currentUser,
+            availableBalance: refundedAvail,
+            balance: refundedAvail
+          });
+        }
+      });
   };
 
   const handleExecuteTrade = (e: React.FormEvent) => {

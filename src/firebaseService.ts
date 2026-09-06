@@ -3297,8 +3297,17 @@ export function sanitizeErrorMessage(
  * 5. Saves running trade in 'solo_trades' collection
  * 6. Logs wallet transaction 'TRADE_INVEST'
  */
-// Serialized transaction queue for atomic back-to-back solo trade placements without Firestore document contention
-let soloTradePlacementQueue: Promise<any> = Promise.resolve();
+// Serialized per-user transaction queues to ensure atomic back-to-back operations
+// on user wallet (both trade placements and trade settlements) without Firestore document contention
+const userWalletActionQueues = new Map<string, Promise<any>>();
+export const tradeIdToUserIdMap = new Map<string, string>();
+
+export function enqueueUserWalletAction<T>(userId: string, task: () => Promise<T>): Promise<T> {
+  const currentQueue = userWalletActionQueues.get(userId) || Promise.resolve();
+  const nextPromise = currentQueue.then(task, task);
+  userWalletActionQueues.set(userId, nextPromise.catch(() => {}));
+  return nextPromise;
+}
 
 export async function placeSoloTrade(
   userId: string,
@@ -3314,8 +3323,11 @@ export async function placeSoloTrade(
   drawRuleParam?: "REFUND" | "LOSS",
   customTradeId?: string
 ): Promise<string> {
-  const currentTask = async () => {
-    return executeSoloTradePlacement(
+  if (customTradeId) {
+    tradeIdToUserIdMap.set(customTradeId, userId);
+  }
+  return enqueueUserWalletAction(userId, () =>
+    executeSoloTradePlacement(
       userId,
       tradeType,
       stake,
@@ -3328,12 +3340,8 @@ export async function placeSoloTrade(
       clientEndTimeISO,
       drawRuleParam,
       customTradeId
-    );
-  };
-
-  const queuePromise = soloTradePlacementQueue.then(currentTask, currentTask);
-  soloTradePlacementQueue = queuePromise.catch(() => {});
-  return queuePromise;
+    )
+  );
 }
 
 async function executeSoloTradePlacement(
@@ -3638,6 +3646,34 @@ export async function settleSoloTrade(
     return { result: "ALREADY_SETTLED", profitOrLoss: 0, payout: 0 };
   }
 
+  let userId = tradeIdToUserIdMap.get(tradeId);
+  if (!userId) {
+    try {
+      const snap = await getDoc(doc(db, "solo_trades", tradeId));
+      if (snap.exists()) {
+        const d = snap.data();
+        if (d?.userId) {
+          userId = d.userId;
+          tradeIdToUserIdMap.set(tradeId, userId);
+        }
+      }
+    } catch {}
+  }
+
+  if (userId) {
+    return enqueueUserWalletAction(userId, () => executeSoloTradeSettlement(tradeId, providedExitPrice));
+  }
+  return executeSoloTradeSettlement(tradeId, providedExitPrice);
+}
+
+async function executeSoloTradeSettlement(
+  tradeId: string,
+  providedExitPrice?: number
+): Promise<{ result: "WON" | "LOST" | "DRAW" | "ALREADY_SETTLED"; profitOrLoss: number; payout: number }> {
+  if (settledTradeIdsSet.has(tradeId)) {
+    return { result: "ALREADY_SETTLED", profitOrLoss: 0, payout: 0 };
+  }
+
   const lockedPrice = getLockedExitPrice(tradeId);
   const preferredExitPrice = lockedPrice ?? providedExitPrice;
 
@@ -3647,127 +3683,147 @@ export async function settleSoloTrade(
 
   console.log(`[Firestore Write / Trade Settlement] Initiating settlement for tradeId=${tradeId} (Locked: ${lockedPrice}, Provided: ${providedExitPrice})`);
 
-  try {
-    let outcomeResult: { result: "WON" | "LOST" | "DRAW" | "ALREADY_SETTLED"; profitOrLoss: number; payout: number } = {
-      result: "ALREADY_SETTLED",
-      profitOrLoss: 0,
-      payout: 0
-    };
+  let attempt = 0;
+  let lastErr: any = null;
 
-    await runTransaction(db, async (transaction) => {
-      const tradeSnap = await transaction.get(tradeRef);
-      if (!tradeSnap.exists()) {
-        return;
-      }
-      const trade = tradeSnap.data() as SoloTrade;
+  while (attempt < 3) {
+    try {
+      attempt++;
+      let outcomeResult: { result: "WON" | "LOST" | "DRAW" | "ALREADY_SETTLED"; profitOrLoss: number; payout: number } = {
+        result: "ALREADY_SETTLED",
+        profitOrLoss: 0,
+        payout: 0
+      };
 
-      if (trade.status !== "RUNNING") {
-        outcomeResult = {
-          result: "ALREADY_SETTLED",
-          profitOrLoss: trade.profitOrLoss || 0,
-          payout: trade.expectedPayout || 0
-        };
-        return;
-      }
-
-      const entry = trade.entryPrice;
-      const validPreferred = typeof preferredExitPrice === "number" && !isNaN(preferredExitPrice) && preferredExitPrice > 0 ? preferredExitPrice : null;
-      const validDocExit = typeof trade.exitPrice === "number" && !isNaN(trade.exitPrice) && trade.exitPrice > 0 ? trade.exitPrice : null;
-      const liveCurrent = livePriceService.getPrice(trade.tradingSymbol);
-      const validLive = typeof liveCurrent === "number" && !isNaN(liveCurrent) && liveCurrent > 0 ? liveCurrent : null;
-
-      const exit = validPreferred ?? validDocExit ?? validLive ?? entry;
-      let isWin = false;
-      let isDraw = false;
-
-      if (trade.tradeType === "CALL") {
-        if (exit > entry) {
-          isWin = true;
-        } else if (exit === entry) {
-          isDraw = true;
+      await runTransaction(db, async (transaction) => {
+        const tradeSnap = await transaction.get(tradeRef);
+        if (!tradeSnap.exists()) {
+          return;
         }
-      } else {
-        // PUT
-        if (exit < entry) {
-          isWin = true;
-        } else if (exit === entry) {
-          isDraw = true;
+        const trade = tradeSnap.data() as SoloTrade;
+
+        if (trade.status !== "RUNNING") {
+          outcomeResult = {
+            result: "ALREADY_SETTLED",
+            profitOrLoss: trade.profitOrLoss || 0,
+            payout: trade.expectedPayout || 0
+          };
+          return;
         }
-      }
 
-      let finalOutcome: "WON" | "LOST" | "DRAW" = "LOST";
-      let finalProfitOrLoss = -trade.stake;
-      let finalPayout = 0;
+        const entry = trade.entryPrice;
+        const validPreferred = typeof preferredExitPrice === "number" && !isNaN(preferredExitPrice) && preferredExitPrice > 0 ? preferredExitPrice : null;
+        const validDocExit = typeof trade.exitPrice === "number" && !isNaN(trade.exitPrice) && trade.exitPrice > 0 ? trade.exitPrice : null;
+        const liveCurrent = livePriceService.getPrice(trade.tradingSymbol);
+        const validLive = typeof liveCurrent === "number" && !isNaN(liveCurrent) && liveCurrent > 0 ? liveCurrent : null;
 
-      if (isWin) {
-        finalOutcome = "WON";
-        const profit = (trade.stake * trade.payoutPercentage) / 100;
-        finalPayout = trade.stake + profit;
-        finalProfitOrLoss = profit;
-      } else if (isDraw && trade.drawRule === "REFUND") {
-        finalOutcome = "DRAW";
-        finalPayout = trade.stake;
-        finalProfitOrLoss = 0;
-      } else {
-        finalOutcome = "LOST";
-        finalPayout = 0;
-        finalProfitOrLoss = -trade.stake;
-      }
+        const exit = validPreferred ?? validDocExit ?? validLive ?? entry;
+        let isWin = false;
+        let isDraw = false;
 
-      const settledIso = new Date().toISOString();
-      const userRef = doc(db, "users", trade.userId);
+        if (trade.tradeType === "CALL") {
+          if (exit > entry) {
+            isWin = true;
+          } else if (exit === entry) {
+            isDraw = true;
+          }
+        } else {
+          // PUT
+          if (exit < entry) {
+            isWin = true;
+          } else if (exit === entry) {
+            isDraw = true;
+          }
+        }
 
-      // Step 1: Execute ALL reads before any writes (Firestore Transaction Mandate)
-      let uSnap: any = null;
-      if (finalPayout > 0) {
-        uSnap = await transaction.get(userRef);
-      }
+        let finalOutcome: "WON" | "LOST" | "DRAW" = "LOST";
+        let finalProfitOrLoss = -trade.stake;
+        let finalPayout = 0;
 
-      // Step 2: Execute ALL writes after reads have completed
-      transaction.update(tradeRef, {
-        status: finalOutcome,
-        exitPrice: exit,
-        profitOrLoss: finalProfitOrLoss,
-        settledAt: settledIso
-      });
+        if (isWin) {
+          finalOutcome = "WON";
+          const profit = (trade.stake * trade.payoutPercentage) / 100;
+          finalPayout = trade.stake + profit;
+          finalProfitOrLoss = profit;
+        } else if (isDraw && trade.drawRule === "REFUND") {
+          finalOutcome = "DRAW";
+          finalPayout = trade.stake;
+          finalProfitOrLoss = 0;
+        } else {
+          finalOutcome = "LOST";
+          finalPayout = 0;
+          finalProfitOrLoss = -trade.stake;
+        }
 
-      if (finalPayout > 0 && uSnap && uSnap.exists()) {
-        const u = uSnap.data() as UserProfile;
-        const currAvail = Math.max(0, u.availableBalance ?? u.balance ?? 0);
-        const currBal = Math.max(0, u.balance ?? currAvail);
-        transaction.update(userRef, {
-          availableBalance: currAvail + finalPayout,
-          balance: currBal + finalPayout
+        const settledIso = new Date().toISOString();
+        const userRef = doc(db, "users", trade.userId);
+
+        // Step 1: Execute ALL reads before any writes (Firestore Transaction Mandate)
+        let uSnap: any = null;
+        if (finalPayout > 0) {
+          uSnap = await transaction.get(userRef);
+        }
+
+        // Step 2: Execute ALL writes after reads have completed
+        transaction.update(tradeRef, {
+          status: finalOutcome,
+          exitPrice: exit,
+          profitOrLoss: finalProfitOrLoss,
+          settledAt: settledIso
         });
 
-        const settleTxId = "tx_solo_set_" + Date.now() + "_" + Math.floor(Math.random() * 100000);
-        const settleTxRef = doc(db, "wallet_transactions", settleTxId);
+        if (finalPayout > 0 && uSnap && uSnap.exists()) {
+          const u = uSnap.data() as UserProfile;
+          const currAvail = Math.max(0, u.availableBalance ?? u.balance ?? 0);
+          const currBal = Math.max(0, u.balance ?? currAvail);
+          transaction.update(userRef, {
+            availableBalance: currAvail + finalPayout,
+            balance: currBal + finalPayout
+          });
 
-        const walletTx: WalletTransaction = {
-          id: settleTxId,
-          userId: trade.userId,
-          userEmail: trade.userEmail,
-          userName: trade.userName,
-          type: finalOutcome === "WON" ? "TRADE_PROFIT" : finalOutcome === "DRAW" ? "TRADE_REFUND" : "TRADE_LOSS",
-          amount: finalPayout > 0 ? finalPayout : trade.stake,
-          status: "APPROVED",
-          createdAt: settledIso,
-          referenceId: tradeId,
-          txDetails: `Solo Option Settled (${finalOutcome}): Entry ${entry.toFixed(2)} -> Exit ${exit.toFixed(2)} (${trade.assetPair})`
-        };
-        transaction.set(settleTxRef, walletTx);
+          const settleTxId = "tx_solo_set_" + Date.now() + "_" + Math.floor(Math.random() * 100000);
+          const settleTxRef = doc(db, "wallet_transactions", settleTxId);
+
+          const walletTx: WalletTransaction = {
+            id: settleTxId,
+            userId: trade.userId,
+            userEmail: trade.userEmail,
+            userName: trade.userName,
+            type: finalOutcome === "WON" ? "TRADE_PROFIT" : finalOutcome === "DRAW" ? "TRADE_REFUND" : "TRADE_LOSS",
+            amount: finalPayout > 0 ? finalPayout : trade.stake,
+            status: "APPROVED",
+            createdAt: settledIso,
+            referenceId: tradeId,
+            txDetails: `Solo Option Settled (${finalOutcome}): Entry ${entry.toFixed(2)} -> Exit ${exit.toFixed(2)} (${trade.assetPair})`
+          };
+          transaction.set(settleTxRef, walletTx);
+        }
+
+        outcomeResult = { result: finalOutcome, profitOrLoss: finalProfitOrLoss, payout: finalPayout };
+      });
+
+      console.log(`[Trade Transition] RUNNING -> ${outcomeResult.result}: Trade ${tradeId} settled. Payout: ₹${outcomeResult.payout.toFixed(2)}`);
+      return outcomeResult;
+    } catch (err: any) {
+      lastErr = err;
+      const errMsg = String(err?.message || err);
+      if (
+        errMsg.includes("the stored version") ||
+        errMsg.includes("does not match the required base version") ||
+        errMsg.includes("contention") ||
+        errMsg.includes("ABORTED")
+      ) {
+        console.warn(`[Retryable Firestore Settlement Contention] Trade ${tradeId} attempt ${attempt}/3:`, errMsg);
+        await new Promise((resolve) => setTimeout(resolve, 80 * Math.pow(2, attempt) + Math.random() * 50));
+        continue;
       }
-
-      outcomeResult = { result: finalOutcome, profitOrLoss: finalProfitOrLoss, payout: finalPayout };
-    });
-
-    console.log(`[Trade Transition] RUNNING -> ${outcomeResult.result}: Trade ${tradeId} settled. Payout: ₹${outcomeResult.payout.toFixed(2)}`);
-    return outcomeResult;
-  } catch (err) {
-    settledTradeIdsSet.delete(tradeId);
-    console.error(`[Firestore Write Error / Trade Settlement Failed] Trade ${tradeId}:`, err);
-    throw err;
+      break;
+    }
   }
+
+  settledTradeIdsSet.delete(tradeId);
+  console.error(`[Firestore Write Error / Trade Settlement Failed] Trade ${tradeId}:`, lastErr);
+  throw lastErr;
 }
 
 const autoSettlingTradeIds = new Set<string>();
@@ -3852,7 +3908,13 @@ export function subscribeUserSoloTrades(userId: string, callback: (trades: SoloT
     q,
     (snapshot) => {
       const list: SoloTrade[] = [];
-      snapshot.forEach((d) => list.push(d.data() as SoloTrade));
+      snapshot.forEach((d) => {
+        const t = d.data() as SoloTrade;
+        if (t?.id && t?.userId) {
+          tradeIdToUserIdMap.set(t.id, t.userId);
+        }
+        list.push(t);
+      });
       const combined = getCombined(list);
       console.log(`[Firestore Read] Received ${snapshot.size} remote solo_trades for userId=${userId}. Combined total: ${combined.length}`);
       autoSettleExpiredTrades(combined);

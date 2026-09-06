@@ -238,6 +238,7 @@ export default function App() {
   } | null>(null);
 
   const notificationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastProfileUpdateTimeRef = useRef<number>(0);
 
   // Set up auto-dismiss notification helper
   const triggerNotification = useCallback((message: string, type: "success" | "info" | "error" = "success") => {
@@ -338,7 +339,19 @@ export default function App() {
             const index = prev.findIndex((u) => u.id === updatedUser.id);
             if (index >= 0) {
               const copy = [...prev];
-              copy[index] = updatedUser;
+              const existing = copy[index];
+              // If user profile was updated optimistically within the last 2500ms (e.g. active trading / settlement),
+              // preserve the optimistic balance to prevent Firestore intermediate snapshots from causing balance flicker / jumping
+              const isRecentlyUpdated = Date.now() - lastProfileUpdateTimeRef.current < 2500;
+              if (isRecentlyUpdated && existing) {
+                copy[index] = {
+                  ...updatedUser,
+                  availableBalance: existing.availableBalance ?? updatedUser.availableBalance,
+                  balance: existing.balance ?? updatedUser.balance
+                };
+              } else {
+                copy[index] = updatedUser;
+              }
               return copy;
             }
             return [updatedUser, ...prev];
@@ -1344,6 +1357,7 @@ export default function App() {
               onToggleTheme={toggleTheme}
               onTriggerNotification={triggerNotification}
               onUpdateProfile={(updatedUser) => {
+                lastProfileUpdateTimeRef.current = Date.now();
                 setUsers((prev) => prev.map((u) => u.id === updatedUser.id ? updatedUser : u));
                 try {
                   localStorage.setItem("cached_user_" + updatedUser.id, JSON.stringify(updatedUser));
