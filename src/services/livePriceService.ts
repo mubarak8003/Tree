@@ -1480,6 +1480,15 @@ class LivePriceManager {
               this.setPrice(oandaSymbol, quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
               this.setPrice(sym, quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
 
+              if (standardSym === "XAUUSD") {
+                this.setRawExternalPrice("GOLD", quote);
+                this.setPrice("GOLD", quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
+              }
+              if (standardSym === "XAGUSD") {
+                this.setRawExternalPrice("SILVER", quote);
+                this.setPrice("SILVER", quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
+              }
+
               this.lastRealInboundTickTime = now;
               this.lastRealInboundBySymbol[sym] = now;
               this.lastRealInboundBySymbol[standardSym] = now;
@@ -1522,6 +1531,15 @@ class LivePriceManager {
               this.setPrice(fxSymbol, quote, false, "Deriv Official Interbank WS", 15, reqTime, respTime);
               this.setPrice(oandaSymbol, quote, false, "Deriv Official Interbank WS", 15, reqTime, respTime);
               this.setPrice(derivSymbol, quote, false, "Deriv Official Interbank WS", 15, reqTime, respTime);
+
+              if (standardSym === "XAUUSD") {
+                this.setRawExternalPrice("GOLD", quote);
+                this.setPrice("GOLD", quote, false, "Deriv Official Interbank WS", 15, reqTime, respTime);
+              }
+              if (standardSym === "XAGUSD") {
+                this.setRawExternalPrice("SILVER", quote);
+                this.setPrice("SILVER", quote, false, "Deriv Official Interbank WS", 15, reqTime, respTime);
+              }
 
               this.lastRealInboundTickTime = now;
               this.lastRealInboundBySymbol[derivSymbol] = now;
@@ -3213,8 +3231,9 @@ class LivePriceManager {
       } else if (config.patternType === "HIGH_VOLATILITY_WAVE") {
         phaseIdx = Math.min(3, Math.floor(t * 3) + 1);
         phaseDesc = `⚡ High Frequency Market Whipsaw (${remainingSec}s remaining)...`;
-        const wave = Math.sin(t * Math.PI * 4);
-        currentTarget = startPrice + wave * (range * 0.75) + (targetClose - startPrice) * t;
+        // Organic market whipsaw without artificial periodic sine wave oscillations
+        const organicNoise = (Math.random() - 0.495) * (range * 0.5);
+        currentTarget = startPrice + organicNoise + (targetClose - startPrice) * t;
       } else {
         // CUSTOM_PRICE_TARGET or others
         phaseIdx = Math.min(3, Math.floor(t * 3) + 1);
