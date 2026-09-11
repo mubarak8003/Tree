@@ -5,7 +5,8 @@ import {
 import { 
   Users, Search, DollarSign, Ban, Trash2, AlertTriangle, Phone, ShieldCheck, 
   CreditCard, CheckCircle2, XCircle, Clock, ChevronDown, ChevronUp, Check, 
-  ArrowUpRight, ArrowDownRight, RefreshCw, Edit2, Shield, Eye, Key, Copy, Smartphone
+  ArrowUpRight, ArrowDownRight, RefreshCw, Edit2, Shield, Eye, Key, Copy, Smartphone,
+  Minus, Plus
 } from "lucide-react";
 import { 
   adjustUserBalance, toggleBlockUser, deleteUserProfile,
@@ -35,7 +36,7 @@ export const UsersTab: React.FC<UsersTabProps> = ({
   // Balance adjustment modal state
   const [balanceUser, setBalanceUser] = useState<UserProfile | null>(null);
   const [adjustAmount, setAdjustAmount] = useState<string>("");
-  const [adjustType, setAdjustType] = useState<"BONUS" | "ADJUSTMENT">("BONUS");
+  const [adjustType, setAdjustType] = useState<"BONUS" | "DEDUCT" | "ADJUSTMENT">("BONUS");
   const [adjustReason, setAdjustReason] = useState("");
   const [isAdjusting, setIsAdjusting] = useState(false);
 
@@ -344,15 +345,49 @@ export const UsersTab: React.FC<UsersTabProps> = ({
 
   const handleAdjustBalance = async (e: React.FormEvent) => {
     e.preventDefault();
-    const numAmount = Number(adjustAmount);
-    if (!balanceUser || isNaN(numAmount) || numAmount <= 0) {
-      onTriggerNotification?.("Please enter a valid amount greater than 0", "error");
+    if (!balanceUser) return;
+
+    const rawNum = parseFloat(adjustAmount);
+    if (isNaN(rawNum) || rawNum === 0) {
+      onTriggerNotification?.("Please enter a valid non-zero amount", "error");
       return;
     }
+
+    const currentAvail = Number(balanceUser.availableBalance ?? balanceUser.balance ?? 0);
+    let delta = rawNum;
+    if (adjustType === "DEDUCT") {
+      // Deduct mode: subtract value
+      delta = -Math.abs(rawNum);
+    } else if (adjustType === "BONUS") {
+      // Bonus mode: credit value unless user explicitly entered negative
+      delta = rawNum < 0 ? rawNum : Math.abs(rawNum);
+    } else {
+      // Custom Adjustment / Correction: rawNum (+ to add, - to subtract)
+      delta = rawNum;
+    }
+
+    if (delta < 0 && Math.abs(delta) > currentAvail) {
+      onTriggerNotification?.(`Cannot deduct more than available balance (₹${currentAvail.toFixed(2)})`, "error");
+      return;
+    }
+
     try {
       setIsAdjusting(true);
-      await adjustUserBalance(balanceUser.id, numAmount, adjustType, adjustReason || "Admin balance adjustment");
-      onTriggerNotification?.(`Successfully adjusted balance by ₹${numAmount} (${adjustType})`, "success");
+      const isMinus = delta < 0;
+      const txType: "BONUS" | "ADJUSTMENT" = adjustType === "BONUS" && delta > 0 ? "BONUS" : "ADJUSTMENT";
+      const defaultReason = isMinus 
+        ? `Admin balance deduction (-₹${Math.abs(delta).toFixed(2)})` 
+        : `Admin balance credit (+₹${delta.toFixed(2)})`;
+
+      await adjustUserBalance(balanceUser.id, delta, txType, adjustReason.trim() || defaultReason);
+      
+      const newBal = Number((currentAvail + delta).toFixed(2));
+      onTriggerNotification?.(
+        isMinus 
+          ? `Successfully deducted ₹${Math.abs(delta).toFixed(2)} from ${balanceUser.name || balanceUser.id}. New balance: ₹${newBal.toFixed(2)}`
+          : `Successfully credited ₹${delta.toFixed(2)} to ${balanceUser.name || balanceUser.id}. New balance: ₹${newBal.toFixed(2)}`,
+        "success"
+      );
       setBalanceUser(null);
       setAdjustAmount("");
       setAdjustReason("");
@@ -1013,86 +1048,257 @@ export const UsersTab: React.FC<UsersTabProps> = ({
       </div>
 
       {/* Balance Adjustment Modal */}
-      {balanceUser && (
-        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl max-w-md w-full p-6 shadow-2xl relative">
-            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 mb-1">
-              Adjust Balance: {balanceUser.name || balanceUser.id}
-            </h3>
-            <p className="text-xs text-slate-500 mb-4">
-              Current Available: ₹{(balanceUser.availableBalance ?? balanceUser.balance ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-            </p>
+      {balanceUser && (() => {
+        const currentAvail = Number(balanceUser.availableBalance ?? balanceUser.balance ?? 0);
+        const rawNum = parseFloat(adjustAmount);
+        const isNumEntered = !isNaN(rawNum) && rawNum !== 0;
 
-            <form onSubmit={handleAdjustBalance} className="space-y-3">
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Action Type</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setAdjustType("BONUS")}
-                    className={`py-2 text-xs font-bold rounded-xl cursor-pointer transition-all ${
-                      adjustType === "BONUS" ? "bg-emerald-600 text-white" : "bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
-                    }`}
-                  >
-                    + Add Bonus / Credit
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAdjustType("ADJUSTMENT")}
-                    className={`py-2 text-xs font-bold rounded-xl cursor-pointer transition-all ${
-                      adjustType === "ADJUSTMENT" ? "bg-indigo-600 text-white" : "bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
-                    }`}
-                  >
-                    Adjust / Correction
-                  </button>
+        let effectiveDelta = 0;
+        if (isNumEntered) {
+          if (adjustType === "DEDUCT") {
+            effectiveDelta = -Math.abs(rawNum);
+          } else if (adjustType === "BONUS") {
+            effectiveDelta = rawNum < 0 ? rawNum : Math.abs(rawNum);
+          } else {
+            effectiveDelta = rawNum;
+          }
+        }
+
+        const isDeduction = effectiveDelta < 0 || (adjustType === "DEDUCT" && isNumEntered);
+        const projectedBalance = Number((currentAvail + effectiveDelta).toFixed(2));
+        const isOverLimit = effectiveDelta < 0 && Math.abs(effectiveDelta) > currentAvail;
+        const canSubmit = isNumEntered && !isOverLimit && !isAdjusting;
+
+        const quickAmounts = [50, 100, 250, 500, 1000];
+
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl max-w-md w-full p-6 shadow-2xl relative">
+              <div className="flex items-start justify-between mb-3">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 mb-0.5">
+                    Adjust Balance: {balanceUser.name || balanceUser.id}
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    User Email: {balanceUser.email || "No email"}
+                  </p>
                 </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Amount (₹)</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  placeholder="Enter amount (₹)"
-                  value={adjustAmount}
-                  onChange={(e) => setAdjustAmount(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100 font-bold"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Reason / Note</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Deposit Compensation, Promotion bonus"
-                  value={adjustReason}
-                  onChange={(e) => setAdjustReason(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setBalanceUser(null)}
-                  className="px-4 py-2 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-bold rounded-xl cursor-pointer"
+                  onClick={() => {
+                    setBalanceUser(null);
+                    setAdjustAmount("");
+                    setAdjustReason("");
+                  }}
+                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-sm p-1 cursor-pointer"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isAdjusting || !adjustAmount || isNaN(Number(adjustAmount)) || Number(adjustAmount) <= 0}
-                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition-all cursor-pointer shadow-md disabled:opacity-50"
-                >
-                  {isAdjusting ? "Processing..." : "Confirm Adjustment"}
+                  ✕
                 </button>
               </div>
-            </form>
+
+              <form onSubmit={handleAdjustBalance} className="space-y-3.5">
+                {/* Action Type 3-Way Switch */}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
+                    Action Type (Add, Minus / Deduct, or Custom)
+                  </label>
+                  <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-100 dark:bg-slate-800/80 rounded-2xl">
+                    <button
+                      type="button"
+                      onClick={() => setAdjustType("BONUS")}
+                      className={`py-2 px-2 text-[11px] font-bold rounded-xl cursor-pointer transition-all flex items-center justify-center gap-1 ${
+                        adjustType === "BONUS"
+                          ? "bg-emerald-600 text-white shadow-xs"
+                          : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200"
+                      }`}
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      + Add Credit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAdjustType("DEDUCT")}
+                      className={`py-2 px-2 text-[11px] font-bold rounded-xl cursor-pointer transition-all flex items-center justify-center gap-1 ${
+                        adjustType === "DEDUCT"
+                          ? "bg-rose-600 text-white shadow-xs"
+                          : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200"
+                      }`}
+                    >
+                      <Minus className="h-3.5 w-3.5" />
+                      - Deduct (Minus)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAdjustType("ADJUSTMENT")}
+                      className={`py-2 px-2 text-[11px] font-bold rounded-xl cursor-pointer transition-all flex items-center justify-center gap-1 ${
+                        adjustType === "ADJUSTMENT"
+                          ? "bg-indigo-600 text-white shadow-xs"
+                          : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200"
+                      }`}
+                    >
+                      +/- Custom
+                    </button>
+                  </div>
+                </div>
+
+                {/* Amount Input */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">
+                      Amount (₹)
+                    </label>
+                    {adjustType === "DEDUCT" && currentAvail > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setAdjustAmount(currentAvail.toString())}
+                        className="text-[10px] font-bold text-rose-600 dark:text-rose-400 hover:underline cursor-pointer"
+                      >
+                        Deduct All (₹{currentAvail.toLocaleString('en-IN', { minimumFractionDigits: 2 })})
+                      </button>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400 font-bold text-xs">
+                      {isDeduction ? "-₹" : "+₹"}
+                    </div>
+                    <input
+                      type="number"
+                      step="any"
+                      placeholder={
+                        adjustType === "DEDUCT"
+                          ? "Enter amount to deduct, e.g. 100"
+                          : adjustType === "BONUS"
+                          ? "Enter credit amount, e.g. 100 (or -100 to minus)"
+                          : "e.g. +100 to add, -100 to deduct"
+                      }
+                      value={adjustAmount}
+                      onChange={(e) => setAdjustAmount(e.target.value)}
+                      className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl pl-8 pr-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100 font-bold focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
+                      required
+                    />
+                  </div>
+
+                  {/* Quick preset chips */}
+                  <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                    <span className="text-[10px] text-slate-400 font-medium mr-0.5">Quick:</span>
+                    {quickAmounts.map((amt) => (
+                      <button
+                        key={amt}
+                        type="button"
+                        onClick={() => setAdjustAmount(amt.toString())}
+                        className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-[10px] font-semibold text-slate-600 dark:text-slate-300 rounded-lg cursor-pointer transition-colors"
+                      >
+                        ₹{amt}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Live Balance Impact Preview Card */}
+                <div className={`p-3 rounded-2xl border text-xs transition-colors ${
+                  isOverLimit
+                    ? "bg-rose-50 dark:bg-rose-950/30 border-rose-300 dark:border-rose-900/60"
+                    : effectiveDelta < 0
+                    ? "bg-rose-50/50 dark:bg-rose-950/20 border-rose-200 dark:border-rose-900/40"
+                    : effectiveDelta > 0
+                    ? "bg-emerald-50/50 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-900/40"
+                    : "bg-slate-50 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700"
+                }`}>
+                  <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-1">
+                    <span>Current Available Balance:</span>
+                    <span className="font-bold text-slate-800 dark:text-slate-200">
+                      ₹{currentAvail.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+
+                  {isNumEntered && (
+                    <div className="flex items-center justify-between mb-1">
+                      <span className={effectiveDelta < 0 ? "text-rose-600 dark:text-rose-400 font-medium" : "text-emerald-600 dark:text-emerald-400 font-medium"}>
+                        {effectiveDelta < 0 ? "Minus / Deduction:" : "Credit / Addition:"}
+                      </span>
+                      <span className={`font-bold ${effectiveDelta < 0 ? "text-rose-600 dark:text-rose-400" : "text-emerald-600 dark:text-emerald-400"}`}>
+                        {effectiveDelta < 0 ? `-₹${Math.abs(effectiveDelta).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : `+₹${effectiveDelta.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="pt-1.5 border-t border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between font-bold">
+                    <span className="text-slate-700 dark:text-slate-300">New Available Balance:</span>
+                    <span className={`text-sm ${
+                      isOverLimit ? "text-rose-600 dark:text-rose-400 font-black" : "text-slate-900 dark:text-slate-100"
+                    }`}>
+                      ₹{Math.max(0, projectedBalance).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+
+                  {isOverLimit && (
+                    <div className="mt-2 text-[11px] font-bold text-rose-600 dark:text-rose-400 flex items-center gap-1.5">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      <span>Cannot deduct more than available balance (₹{currentAvail.toFixed(2)})!</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Reason Input */}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                    Reason / Note (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder={
+                      isDeduction
+                        ? "e.g. Penalty, withdrawal adjustment, deduction"
+                        : "e.g. Deposit Compensation, Promotion bonus, welcome gift"
+                    }
+                    value={adjustReason}
+                    onChange={(e) => setAdjustReason(e.target.value)}
+                    className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+
+                {/* Action Buttons */}
+                <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBalanceUser(null);
+                      setAdjustAmount("");
+                      setAdjustReason("");
+                    }}
+                    className="px-4 py-2 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-bold rounded-xl cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!canSubmit}
+                    className={`px-5 py-2 text-white text-xs font-bold rounded-xl transition-all cursor-pointer shadow-md disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 ${
+                      isDeduction
+                        ? "bg-rose-600 hover:bg-rose-700"
+                        : "bg-emerald-600 hover:bg-emerald-700"
+                    }`}
+                  >
+                    {isAdjusting ? (
+                      "Processing..."
+                    ) : isDeduction ? (
+                      <>
+                        <Minus className="h-3.5 w-3.5" />
+                        Confirm Deduction {isNumEntered ? `(-₹${Math.abs(effectiveDelta).toFixed(2)})` : ""}
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="h-3.5 w-3.5" />
+                        Confirm Credit {isNumEntered ? `(+₹${Math.abs(effectiveDelta).toFixed(2)})` : ""}
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* KYC & Bank Details Modal */}
       {kycUser && (

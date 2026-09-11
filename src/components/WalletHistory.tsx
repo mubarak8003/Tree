@@ -139,7 +139,8 @@ export const WalletHistory: React.FC<WalletHistoryProps> = ({
                   tx.type === "TRADE_REFUND" || 
                   tx.type === "TRADE_PROFIT" || 
                   tx.type === "BONUS" ||
-                  tx.type === "TRANSFER_RECEIVED";
+                  tx.type === "TRANSFER_RECEIVED" ||
+                  (tx.type === "ADJUSTMENT" && (tx.balanceAfter ?? 0) >= (tx.balanceBefore ?? 0));
 
                 return (
                   <tr key={tx.id} className="hover:bg-slate-50/40 dark:hover:bg-slate-950/20 transition-colors">

@@ -201,9 +201,9 @@ export const AdminTradingBalanceReport: React.FC<AdminTradingBalanceReportProps>
       .reduce((sum, tx) => sum + (tx.amount || 0), 0);
 
     const totalAdjustments = rangeTx
-      .filter((tx) => tx.type === "BONUS" || tx.type === "ADJUSTMENT" || tx.type === "TRANSFER_RECEIVED")
+      .filter((tx) => tx.type === "BONUS" || (tx.type === "ADJUSTMENT" && (tx.balanceAfter ?? 0) >= (tx.balanceBefore ?? 0)) || tx.type === "TRANSFER_RECEIVED")
       .reduce((sum, tx) => sum + (tx.amount || 0), 0) -
-      rangeTx.filter((tx) => tx.type === "TRANSFER_SENT").reduce((sum, tx) => sum + (tx.amount || 0), 0);
+      rangeTx.filter((tx) => (tx.type === "ADJUSTMENT" && (tx.balanceAfter ?? 0) < (tx.balanceBefore ?? 0)) || tx.type === "TRANSFER_SENT").reduce((sum, tx) => sum + (tx.amount || 0), 0);
 
     // 6. Wallet Balances
     const finalWalletBalance = selectedUser.balance ?? 0;
@@ -320,9 +320,9 @@ export const AdminTradingBalanceReport: React.FC<AdminTradingBalanceReportProps>
         .filter((tx) => tx.type === "WITHDRAWAL")
         .reduce((sum, tx) => sum + (tx.amount || 0), 0);
       const adjustments = rangeTx
-        .filter((tx) => tx.type === "BONUS" || tx.type === "ADJUSTMENT" || tx.type === "TRANSFER_RECEIVED")
+        .filter((tx) => tx.type === "BONUS" || (tx.type === "ADJUSTMENT" && (tx.balanceAfter ?? 0) >= (tx.balanceBefore ?? 0)) || tx.type === "TRANSFER_RECEIVED")
         .reduce((sum, tx) => sum + (tx.amount || 0), 0) -
-        rangeTx.filter((tx) => tx.type === "TRANSFER_SENT").reduce((sum, tx) => sum + (tx.amount || 0), 0);
+        rangeTx.filter((tx) => (tx.type === "ADJUSTMENT" && (tx.balanceAfter ?? 0) < (tx.balanceBefore ?? 0)) || tx.type === "TRANSFER_SENT").reduce((sum, tx) => sum + (tx.amount || 0), 0);
 
       const finalBal = u.balance ?? 0;
       const netDelta = netPnL + deposits - withdrawals + adjustments;

@@ -754,7 +754,8 @@ export async function updateWalletRequestStatus(
       } else if (tx.type === "WITHDRAWAL" || tx.type === "TRADE_INVEST" || tx.type === "TRADE_LOSS") {
         balanceDelta += tx.amount;
       } else if (tx.type === "ADJUSTMENT") {
-        balanceDelta -= tx.amount;
+        const wasAddition = (tx.balanceAfter ?? 0) >= (tx.balanceBefore ?? 0);
+        balanceDelta += wasAddition ? -tx.amount : tx.amount;
       }
     }
 
@@ -769,7 +770,8 @@ export async function updateWalletRequestStatus(
         }
         balanceDelta -= tx.amount;
       } else if (tx.type === "ADJUSTMENT") {
-        balanceDelta += tx.amount;
+        const wasAddition = (tx.balanceAfter ?? 0) >= (tx.balanceBefore ?? 0);
+        balanceDelta += wasAddition ? tx.amount : -tx.amount;
       }
     }
 
@@ -870,11 +872,18 @@ export async function adjustUserBalance(
     }
     const user = userSnap.data() as UserProfile;
 
-    const nextAvailable = user.availableBalance + amount;
+    const currentAvail = Number(user.availableBalance ?? user.balance ?? 0);
+    const nextAvailable = Number((currentAvail + amount).toFixed(2));
     if (nextAvailable < 0) {
-      throw new Error("Cannot deduct more than the user's current available balance!");
+      throw new Error(`Cannot deduct more than user's available balance! (Available: ₹${currentAvail.toFixed(2)})`);
     }
-    const nextTotal = nextAvailable + user.lockedBalance;
+
+    const isDeduction = amount < 0;
+    const absAmount = Number(Math.abs(amount).toFixed(2));
+
+    const defaultDetails = isDeduction
+      ? `Admin balance deduction (-₹${absAmount.toFixed(2)})`
+      : `Admin balance credit (+₹${absAmount.toFixed(2)})`;
 
     const walletTx: WalletTransaction = {
       id: txId,
@@ -882,18 +891,19 @@ export async function adjustUserBalance(
       userEmail: user.email || "user@example.com",
       userName: user.name || user.email?.split("@")[0] || "Trader",
       type,
-      amount: Math.abs(amount),
+      amount: absAmount,
       status: "APPROVED",
       createdAt: new Date().toISOString(),
-      balanceBefore: user.availableBalance,
+      balanceBefore: currentAvail,
       balanceAfter: nextAvailable,
-      txDetails: reason || (amount >= 0 ? `Admin balance increase` : `Admin balance reduction`)
+      txDetails: reason || defaultDetails
     };
 
     transaction.set(txRef, walletTx);
     transaction.update(userRef, {
       availableBalance: nextAvailable,
-      balance: nextAvailable
+      balance: nextAvailable,
+      updatedAt: new Date().toISOString()
     });
   });
 }
