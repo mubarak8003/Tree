@@ -209,6 +209,23 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
   const [activeDrawingTool, setActiveDrawingTool] = useState<DrawingToolType>("cursor");
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
   const [isDrawingSettingsOpen, setIsDrawingSettingsOpen] = useState<boolean>(false);
+  const [isMagnetEnabled, setIsMagnetEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("chart_drawing_magnet") === "true";
+    } catch (_) {
+      return false;
+    }
+  });
+
+  const handleToggleMagnet = useCallback(() => {
+    setIsMagnetEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("chart_drawing_magnet", String(next));
+      } catch (_) {}
+      return next;
+    });
+  }, []);
 
   // Undo / Redo stacks
   const [undoStack, setUndoStack] = useState<DrawingObject[][]>([]);
@@ -233,6 +250,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
   // Drawing in progress interaction state
   const drawingInProgressRef = useRef<DrawingObject | null>(null);
+  const drawingStartPointerPosRef = useRef<{ x: number; y: number } | null>(null);
   const draggingHandleIndexRef = useRef<number | null>(null);
   const isDraggingDrawingBodyRef = useRef<boolean>(false);
   const dragDrawingAnchorRef = useRef<DrawingPoint | null>(null);
@@ -1230,24 +1248,49 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       const candleWidth = chartWidth / totalSlotCount;
       const barWidth = Math.max(3.5, Math.min(24, candleWidth * 0.74));
 
-      // Coordinate transform for drawing engine
-      const firstCandleTime = visibleCandles[0].time;
-      const lastCandleTime = visibleCandles[visibleCandles.length - 1].time;
-      const timeSpan = Math.max(1, lastCandleTime - firstCandleTime);
+      // Coordinate transform for drawing engine with continuous sub-pixel smoothness and millisecond normalization
+      const toMs = (t: number) => (t > 0 && t < 10000000000 ? t * 1000 : t);
+      const firstCandleMs = toMs(visibleCandles[0].time);
+      const lastCandleMs = toMs(visibleCandles[visibleCandles.length - 1].time);
+      const timeframeMs = timeframeSec * 1000;
 
       const timeToX = (time: number) => {
-        const targetSec = time > 10000000000 ? Math.floor(time / 1000) : time;
-        const idx = visibleCandles.findIndex((c) => Math.abs(c.time - targetSec) < timeframeSec / 2);
-        if (idx >= 0) {
-          return idx * candleWidth + candleWidth / 2;
+        const tMs = toMs(time);
+        if (tMs <= firstCandleMs) {
+          const diff = (tMs - firstCandleMs) / timeframeMs;
+          return diff * candleWidth + candleWidth / 2;
         }
-        const ratio = (targetSec - firstCandleTime) / timeSpan;
+        if (tMs >= lastCandleMs) {
+          const diff = (tMs - lastCandleMs) / timeframeMs;
+          return (visibleCandles.length - 1 + diff) * candleWidth + candleWidth / 2;
+        }
+        for (let i = 0; i < visibleCandles.length - 1; i++) {
+          const t0 = toMs(visibleCandles[i].time);
+          const t1 = toMs(visibleCandles[i + 1].time);
+          if (tMs >= t0 && tMs <= t1) {
+            const span = t1 - t0 || timeframeMs;
+            const frac = (tMs - t0) / span;
+            return (i + frac) * candleWidth + candleWidth / 2;
+          }
+        }
+        const ratio = (tMs - firstCandleMs) / (lastCandleMs - firstCandleMs || 1);
         return ratio * (visibleCandles.length * candleWidth - candleWidth) + candleWidth / 2;
       };
 
       const xToTime = (x: number) => {
-        const idx = Math.max(0, Math.min(visibleCandles.length - 1, Math.floor(x / candleWidth)));
-        return visibleCandles[idx]?.time || Math.floor(Date.now() / 1000);
+        const floatIdx = (x - candleWidth / 2) / candleWidth;
+        if (floatIdx <= 0) {
+          return firstCandleMs + floatIdx * timeframeMs;
+        }
+        if (floatIdx >= visibleCandles.length - 1) {
+          return lastCandleMs + (floatIdx - (visibleCandles.length - 1)) * timeframeMs;
+        }
+        const baseIdx = Math.floor(floatIdx);
+        const frac = floatIdx - baseIdx;
+        const t0 = toMs(visibleCandles[baseIdx].time);
+        const nextTime = visibleCandles[baseIdx + 1]?.time;
+        const t1 = nextTime ? toMs(nextTime) : (t0 + timeframeMs);
+        return t0 + frac * (t1 - t0);
       };
 
       transformRef.current = {
@@ -1413,6 +1456,43 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
               prevD = d;
             }
           }
+        } else if (config.type === "Fractals") {
+          const up = result.values.up;
+          const down = result.values.down;
+          const upColor = config.styles.up?.color || "#10b981";
+          const downColor = config.styles.down?.color || "#ef4444";
+          const size = Math.max(5, Math.min(9, candleWidth * 0.45));
+
+          visibleCandles.forEach((_, i) => {
+            const gIdx = startIndex + i;
+            const x = i * candleWidth + candleWidth / 2;
+
+            // Up Fractal: Peak above candle high
+            const upVal = up ? up[gIdx] : null;
+            if (upVal !== null && upVal !== undefined) {
+              const y = getY(upVal) - 4;
+              ctx.fillStyle = upColor;
+              ctx.beginPath();
+              ctx.moveTo(x, y - size * 1.3);
+              ctx.lineTo(x - size, y);
+              ctx.lineTo(x + size, y);
+              ctx.closePath();
+              ctx.fill();
+            }
+
+            // Down Fractal: Trough below candle low
+            const downVal = down ? down[gIdx] : null;
+            if (downVal !== null && downVal !== undefined) {
+              const y = getY(downVal) + 4;
+              ctx.fillStyle = downColor;
+              ctx.beginPath();
+              ctx.moveTo(x, y + size * 1.3);
+              ctx.lineTo(x - size, y);
+              ctx.lineTo(x + size, y);
+              ctx.closePath();
+              ctx.fill();
+            }
+          });
         } else {
           // Standard Single Line Overlays (EMA, SMA, VWAP)
           const key = Object.keys(result.values)[0];
@@ -1871,6 +1951,24 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     timeframeSec
   ]);
 
+  // Resolve drawing coordinates: Smooth freehand by default (zero magnetic jump), or optional gentle snap
+  const getDrawingPoint = useCallback(
+    (x: number, y: number): DrawingPoint => {
+      const transform = transformRef.current;
+      if (!transform) {
+        return { time: Date.now(), price: 0 };
+      }
+      if (!isMagnetEnabled) {
+        return {
+          time: transform.xToTime(x),
+          price: transform.yToPrice(y)
+        };
+      }
+      return snapPointToCandles(x, y, candlesRef.current, transform, 6);
+    },
+    [isMagnetEnabled]
+  );
+
   // Pointer Handlers for Pan, Zoom and Drawings
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -1891,11 +1989,29 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
     // Active Drawing Tool Mode
     if (activeDrawingTool !== "cursor") {
-      const snapped = snapPointToCandles(x, y, candlesRef.current, transformRef.current);
+      const point = getDrawingPoint(x, y);
+
+      // If drawing is already in progress (e.g. click-to-start mode), finalize on second click
+      if (drawingInProgressRef.current) {
+        const inProg = drawingInProgressRef.current;
+        if (inProg.type === "parallel_channel" && inProg.points.length === 2) {
+          inProg.points.push(point);
+          return;
+        }
+        inProg.points[inProg.points.length - 1] = point;
+        const finished = { ...inProg, updatedAt: Date.now() };
+        drawingInProgressRef.current = null;
+        drawingStartPointerPosRef.current = null;
+        pushUndoState([...drawings, finished]);
+        setSelectedDrawingId(finished.id);
+        setActiveDrawingTool("cursor");
+        return;
+      }
+
       const newDrawing: DrawingObject = {
         id: `draw_${Date.now()}`,
         type: activeDrawingTool,
-        points: [snapped, snapped],
+        points: [point, point],
         style: {
           color: "#38bdf8",
           lineWidth: 2,
@@ -1912,6 +2028,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       };
 
       drawingInProgressRef.current = newDrawing;
+      drawingStartPointerPosRef.current = { x, y };
       try {
         e.currentTarget.setPointerCapture(e.pointerId);
       } catch (_) {}
@@ -1931,7 +2048,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
           draggingHandleIndexRef.current = hitRes.handleIndex;
         } else {
           isDraggingDrawingBodyRef.current = true;
-          dragDrawingAnchorRef.current = snapPointToCandles(x, y, candlesRef.current, transformRef.current);
+          dragDrawingAnchorRef.current = getDrawingPoint(x, y);
         }
 
         try {
@@ -1981,25 +2098,25 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
     // Drawing in progress update
     if (drawingInProgressRef.current) {
-      const snapped = snapPointToCandles(x, y, candlesRef.current, transformRef.current);
+      const currentPt = getDrawingPoint(x, y);
       const inProg = drawingInProgressRef.current;
       if (inProg.type === "parallel_channel" && inProg.points.length === 3) {
-        inProg.points[2] = snapped;
+        inProg.points[2] = currentPt;
       } else {
-        inProg.points[1] = snapped;
+        inProg.points[1] = currentPt;
       }
       return;
     }
 
     // Dragging drawing vertex handle
     if (selectedDrawingId && draggingHandleIndexRef.current !== null) {
-      const snapped = snapPointToCandles(x, y, candlesRef.current, transformRef.current);
+      const currentPt = getDrawingPoint(x, y);
       const idx = draggingHandleIndexRef.current;
       setDrawings((prev) =>
         prev.map((d) => {
           if (d.id === selectedDrawingId) {
             const nextPts = [...d.points];
-            nextPts[idx] = snapped;
+            nextPts[idx] = currentPt;
             return { ...d, points: nextPts, updatedAt: Date.now() };
           }
           return d;
@@ -2010,7 +2127,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
     // Dragging drawing body
     if (selectedDrawingId && isDraggingDrawingBodyRef.current && dragDrawingAnchorRef.current) {
-      const currentPoint = snapPointToCandles(x, y, candlesRef.current, transformRef.current);
+      const currentPoint = getDrawingPoint(x, y);
       const dTime = currentPoint.time - dragDrawingAnchorRef.current.time;
       const dPrice = currentPoint.price - dragDrawingAnchorRef.current.price;
 
@@ -2104,11 +2221,27 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
     // Finalize drawing in progress
     if (drawingInProgressRef.current) {
-      const finished = drawingInProgressRef.current;
-      drawingInProgressRef.current = null;
-      pushUndoState([...drawings, finished]);
-      setSelectedDrawingId(finished.id);
-      setActiveDrawingTool("cursor");
+      const canvas = canvasRef.current;
+      const rect = canvas?.getBoundingClientRect();
+      const x = rect ? e.clientX - rect.left : 0;
+      const y = rect ? e.clientY - rect.top : 0;
+      const startPos = drawingStartPointerPosRef.current;
+      const dist = startPos ? Math.hypot(x - startPos.x, y - startPos.y) : 0;
+
+      // If user performed a drag gesture (dragged > 6px), finalize upon release
+      if (dist > 6) {
+        const inProg = drawingInProgressRef.current;
+        if (inProg.type === "parallel_channel" && inProg.points.length === 2) {
+          // Parallel channel needs second phase to determine width
+        } else {
+          const finished = { ...inProg, updatedAt: Date.now() };
+          drawingInProgressRef.current = null;
+          drawingStartPointerPosRef.current = null;
+          pushUndoState([...drawings, finished]);
+          setSelectedDrawingId(finished.id);
+          setActiveDrawingTool("cursor");
+        }
+      }
     }
 
     // Finalize handle drag or body move
@@ -2283,6 +2416,8 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
             onDeleteAll={handleDeleteAllDrawings}
             drawingsCount={drawings.length}
             isMobile={false}
+            isMagnetEnabled={isMagnetEnabled}
+            onToggleMagnet={handleToggleMagnet}
           />
         </div>
 
@@ -2304,6 +2439,8 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
                     onDeleteAll={handleDeleteAllDrawings}
                     drawingsCount={drawings.length}
                     isMobile={true}
+                    isMagnetEnabled={isMagnetEnabled}
+                    onToggleMagnet={handleToggleMagnet}
                   />
                 </div>
 

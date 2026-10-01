@@ -13,12 +13,12 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Silence non-fatal transient network connection warnings in iframe/sandboxed environments
-setLogLevel("error");
+// Silence non-fatal internal transport and gRPC connection warnings
+setLogLevel("silent");
 
-// Initialize Cloud Firestore
+// Initialize Cloud Firestore with forced HTTP long polling to eliminate gRPC HTTP/2 RST_STREAM errors in proxy/sandbox environments
 export const db = initializeFirestore(app, {
-  experimentalAutoDetectLongPolling: true,
+  experimentalForceLongPolling: true,
   ignoreUndefinedProperties: true,
 });
 

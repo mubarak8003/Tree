@@ -15,16 +15,18 @@ export function snapPointToCandles(
   y: number,
   candles: Candle[],
   transform: ChartCoordinateTransform,
-  thresholdPx: number = 16
+  thresholdPx: number = 0
 ): DrawingPoint {
-  let closestTime = transform.xToTime(x);
-  let closestPrice = transform.yToPrice(y);
+  const closestTime = transform.xToTime(x);
+  const closestPrice = transform.yToPrice(y);
 
-  if (candles.length === 0) {
+  if (thresholdPx <= 0 || !candles || candles.length === 0) {
     return { time: closestTime, price: closestPrice };
   }
 
   let minDistance = thresholdPx;
+  let snappedTime = closestTime;
+  let snappedPrice = closestPrice;
 
   for (const c of candles) {
     const cx = transform.timeToX(c.time);
@@ -37,14 +39,14 @@ export function snapPointToCandles(
         const dist = Math.hypot(cx - x, py - y);
         if (dist < minDistance) {
           minDistance = dist;
-          closestTime = c.time;
-          closestPrice = p;
+          snappedTime = c.time > 10000000000 ? c.time : c.time * 1000;
+          snappedPrice = p;
         }
       }
     }
   }
 
-  return { time: closestTime, price: closestPrice };
+  return { time: snappedTime, price: snappedPrice };
 }
 
 export function hitTestDrawing(

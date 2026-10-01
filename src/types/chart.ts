@@ -60,7 +60,7 @@ export interface DrawingObject {
 }
 
 // Indicator Types
-export type OverlayIndicatorType = "EMA" | "SMA" | "VWAP" | "Supertrend" | "BollingerBands";
+export type OverlayIndicatorType = "EMA" | "SMA" | "VWAP" | "Supertrend" | "BollingerBands" | "Fractals";
 export type SubPanelIndicatorType = "RSI" | "MACD" | "Stochastic" | "CCI" | "ADX" | "ATR" | "Volume" | "OBV";
 export type IndicatorType = OverlayIndicatorType | SubPanelIndicatorType;
 

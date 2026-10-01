@@ -2,7 +2,8 @@ import React from "react";
 import {
   TrendingUp,
   Minus,
-  Trash2
+  Trash2,
+  Magnet
 } from "lucide-react";
 import { DrawingToolType } from "../../types/chart";
 
@@ -18,6 +19,8 @@ interface DrawingToolbarProps {
   hasSelectedDrawing?: boolean;
   drawingsCount?: number;
   isMobile?: boolean;
+  isMagnetEnabled?: boolean;
+  onToggleMagnet?: () => void;
 }
 
 export const DrawingToolbar: React.FC<DrawingToolbarProps> = ({
@@ -25,7 +28,9 @@ export const DrawingToolbar: React.FC<DrawingToolbarProps> = ({
   onSelectTool,
   onDeleteAll,
   drawingsCount = 0,
-  isMobile = false
+  isMobile = false,
+  isMagnetEnabled = false,
+  onToggleMagnet
 }) => {
   return (
     <div
@@ -73,7 +78,28 @@ export const DrawingToolbar: React.FC<DrawingToolbarProps> = ({
         )}
       </button>
 
-      {/* 3. Clear All Drawings */}
+      {/* 3. Magnet / Snap Mode (Smooth freehand by default) */}
+      {onToggleMagnet && (
+        <button
+          type="button"
+          title={isMagnetEnabled ? "Magnet Mode: ON (Click for Smooth Freehand Drawing)" : "Magnet Mode: OFF (Smooth Freehand - Click to Snap to Candles)"}
+          onClick={onToggleMagnet}
+          className={`p-1.5 sm:p-2 rounded-lg sm:rounded-xl transition-all relative group cursor-pointer ${
+            isMagnetEnabled
+              ? "bg-amber-500/20 text-amber-500 border border-amber-500/50 shadow-xs"
+              : "hover:bg-slate-200/80 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+          }`}
+        >
+          <Magnet className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+          {!isMobile && (
+            <span className="absolute left-full ml-2 top-1/2 -translate-y-1/2 hidden group-hover:block px-2 py-1 bg-slate-800 border border-slate-700 rounded text-xs text-white whitespace-nowrap z-50 shadow-lg font-sans">
+              {isMagnetEnabled ? "Magnet ON (Snapping)" : "Magnet OFF (Smooth Drawing)"}
+            </span>
+          )}
+        </button>
+      )}
+
+      {/* 4. Clear All Drawings */}
       <button
         type="button"
         title="Delete All Drawings"

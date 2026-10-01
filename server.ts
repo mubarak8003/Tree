@@ -154,6 +154,8 @@ function startServerBinanceWS() {
 // Start Server-Side Deriv WebSocket & Candle Fetch Engine
 let serverDerivWs: WebSocket | null = null;
 let serverDerivReqSeq = 0;
+let serverDerivWsConnected = false;
+let serverDerivConsecutiveFailures = 0;
 const serverDerivPendingRequests = new Map<number, { resolve: (data: any) => void; timeout: NodeJS.Timeout }>();
 
 function mapServerToDerivSymbol(symbol: string): string {
@@ -189,6 +191,9 @@ function fetchDerivDirectWS(
   timeframeSec: number = 60,
   count: number = 250
 ): Promise<{ time: number; open: number; high: number; low: number; close: number; volume: number }[] | null> {
+  if (!serverDerivWsConnected) {
+    return Promise.resolve(null);
+  }
   return new Promise((resolve) => {
     const isSubMinute = timeframeSec < 60;
     let granularity = 60;
@@ -395,9 +400,13 @@ async function fetchServerDerivCandles(
 function startServerDerivWS() {
   const appId = 1089;
   try {
-    const ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${appId}`);
+    const ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${appId}`, {
+      handshakeTimeout: 3000
+    });
     serverDerivWs = ws;
     ws.on("open", () => {
+      serverDerivWsConnected = true;
+      serverDerivConsecutiveFailures = 0;
       console.log("[Server Live Feed] Deriv WebSocket Connected.");
       const symbols = [
         "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxEURJPY", "frxEURGBP",
@@ -489,14 +498,24 @@ function startServerDerivWS() {
         }
       } catch (_) {}
     });
-    ws.on("error", (err) => console.warn("[Server Deriv WS Error]", err.message));
-    ws.on("close", () => {
+    ws.on("error", () => {
+      // Gracefully handle datacenter network conditions (such as Cloudflare 520) without raising uncaught errors
+      serverDerivWsConnected = false;
       serverDerivWs = null;
-      setTimeout(startServerDerivWS, 5000);
+      serverDerivConsecutiveFailures++;
+    });
+    ws.on("close", () => {
+      serverDerivWsConnected = false;
+      serverDerivWs = null;
+      // Exponential backoff to avoid hammering if datacenter IP is blocked
+      const retryDelay = serverDerivConsecutiveFailures > 2 ? 300000 : 30000;
+      setTimeout(startServerDerivWS, retryDelay);
     });
   } catch (err) {
+    serverDerivWsConnected = false;
     serverDerivWs = null;
-    setTimeout(startServerDerivWS, 5000);
+    serverDerivConsecutiveFailures++;
+    setTimeout(startServerDerivWS, 60000);
   }
 }
 
@@ -1129,6 +1148,74 @@ function mergeIntoServerCandleStore(
   }
 }
 
+// Map any symbol to Yahoo Finance ticker for authentic exchange candles
+function mapSymbolToYahooTicker(raw: string): string | null {
+  const sym = raw.toUpperCase().replace(/^(FX:|OANDA:|TVC:|CURRENCYCOM:|BINANCE:|NSE:|FX_IDC:|DERIV:)/, "").replace(/[^A-Z0-9]/g, "");
+  if (sym === "XAUUSD" || sym === "GOLD" || sym === "FRXXAUUSD") return "GC=F";
+  if (sym === "XAGUSD" || sym === "SILVER" || sym === "FRXXAGUSD") return "SI=F";
+  if (sym === "USOIL" || sym === "OIL" || sym === "FRXOIL" || sym === "CRUDE") return "CL=F";
+  if (sym === "XPTUSD" || sym === "PLATINUM" || sym === "FRXXPTUSD") return "PL=F";
+  if (sym === "US500" || sym === "SPX500") return "^GSPC";
+  if (sym === "US100" || sym === "NAS100") return "^NDX";
+  if (sym === "US30") return "^DJI";
+  if (sym === "DE40" || sym === "GER40") return "^GDAXI";
+  if (sym === "NIFTY" || sym === "NIFTY50") return "^NSEI";
+  
+  if (sym.startsWith("FRX") && sym.length === 9) return `${sym.slice(3)}=X`;
+  if (sym.length === 6) return `${sym}=X`;
+  return null;
+}
+
+async function fetchServerYahooCandles(
+  symbol: string,
+  timeframeSec: number = 60,
+  limit: number = 150
+): Promise<{ time: number; open: number; high: number; low: number; close: number; volume: number }[] | null> {
+  const ticker = mapSymbolToYahooTicker(symbol);
+  if (!ticker) return null;
+  try {
+    const range = timeframeSec <= 60 ? "1d" : timeframeSec <= 3600 ? "5d" : "1mo";
+    const interval = timeframeSec <= 60 ? "1m" : timeframeSec <= 300 ? "5m" : timeframeSec <= 900 ? "15m" : "1h";
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?range=${range}&interval=${interval}`;
+    
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" },
+      signal: AbortSignal.timeout(3000)
+    });
+    if (!res.ok) return null;
+    const json: any = await res.json();
+    const result = json.chart?.result?.[0];
+    if (!result) return null;
+    const timestamps = result.timestamp;
+    const quote = result.indicators?.quote?.[0];
+    if (!timestamps || !quote || !Array.isArray(timestamps)) return null;
+
+    const rawCandles: { time: number; open: number; high: number; low: number; close: number; volume: number }[] = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      const o = quote.open?.[i];
+      const h = quote.high?.[i];
+      const l = quote.low?.[i];
+      const c = quote.close?.[i];
+      const v = quote.volume?.[i] || 1;
+      if (o != null && c != null && !isNaN(o) && !isNaN(c) && o > 0 && c > 0) {
+        rawCandles.push({
+          time: timestamps[i] * 1000,
+          open: +o.toFixed(5),
+          high: +(h != null ? h : Math.max(o, c)).toFixed(5),
+          low: +(l != null ? l : Math.min(o, c)).toFixed(5),
+          close: +c.toFixed(5),
+          volume: v
+        });
+      }
+    }
+
+    if (rawCandles.length === 0) return null;
+    return rawCandles.slice(-limit);
+  } catch (_) {
+    return null;
+  }
+}
+
 async function fetchAndBuildCandles(
   clean: string,
   rawSym: string,
@@ -1224,16 +1311,27 @@ async function fetchAndBuildCandles(
     }
   }
 
-  // 2. FOREX, METALS, COMMODITIES, SYNTHETIC INDICES: Direct Deriv WebSocket (100% Real Deriv Interbank Feed)
+  // 2. FOREX, METALS, COMMODITIES, SYNTHETIC INDICES:
+  // Check Deriv WebSocket feed if connected
+  if (serverDerivWsConnected) {
+    try {
+      const derivSym = mapServerToDerivSymbol(rawSym || clean);
+      const derivCandles = await fetchServerDerivCandles(derivSym, timeframeSec, limit);
+      if (derivCandles && derivCandles.length > 0) {
+        return { candles: derivCandles, isReal: true };
+      }
+    } catch (_) {}
+  }
+
+  // 3. Official Real Market Exchange Candles via Global Financial Chart Feed (Forex, Metals, Commodities)
   try {
-    const derivSym = mapServerToDerivSymbol(rawSym || clean);
-    const derivCandles = await fetchServerDerivCandles(derivSym, timeframeSec, limit);
-    if (derivCandles && derivCandles.length > 0) {
-      return { candles: derivCandles, isReal: true };
+    const yahooCandles = await fetchServerYahooCandles(rawSym || clean, timeframeSec, limit);
+    if (yahooCandles && yahooCandles.length > 0) {
+      return { candles: yahooCandles, isReal: true };
     }
   } catch (_) {}
 
-  // 3. Fallback: If network is temporarily disconnected, maintain continuity with organic micro-walk (No sine waves)
+  // 4. Fallback: Maintain continuity with organic micro-walk (No sine waves)
   const anchorPrice = getServerPrice(clean) || getServerPrice(rawSym) || clientTargetPrice || cachedForexRates[clean] || (clean.includes("XAU") ? 4412 : clean.includes("XAG") ? 65.9 : 100);
   if (anchorPrice && anchorPrice > 0) {
     const bucketMs = timeframeSec * 1000;

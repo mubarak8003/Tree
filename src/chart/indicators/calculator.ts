@@ -245,6 +245,54 @@ export function calculateIndicator(config: IndicatorConfig, candles: Candle[]): 
       };
     }
 
+    case "Fractals": {
+      const period = Math.max(3, Math.floor(Number(config.params.period) || 5));
+      const k = Math.max(1, Math.floor(period / 2));
+      const up: (number | null)[] = new Array(n).fill(null);
+      const down: (number | null)[] = new Array(n).fill(null);
+
+      for (let i = k; i < n - k; i++) {
+        const centerHigh = candles[i].high;
+        const centerLow = candles[i].low;
+
+        let isHighFractal = true;
+        let isLowFractal = true;
+
+        for (let j = 1; j <= k; j++) {
+          if (candles[i - j].high >= centerHigh || candles[i + j].high >= centerHigh) {
+            isHighFractal = false;
+          }
+          if (candles[i - j].low <= centerLow || candles[i + j].low <= centerLow) {
+            isLowFractal = false;
+          }
+        }
+
+        if (isHighFractal) {
+          up[i] = centerHigh;
+        }
+        if (isLowFractal) {
+          down[i] = centerLow;
+        }
+      }
+
+      return {
+        times,
+        values: { up, down },
+        subPlots: [
+          {
+            type: "line",
+            key: "up",
+            color: config.styles.up?.color || "#10b981"
+          },
+          {
+            type: "line",
+            key: "down",
+            color: config.styles.down?.color || "#ef4444"
+          }
+        ]
+      };
+    }
+
     case "RSI": {
       const period = Math.max(1, Number(config.params.period) || 14);
       const source = config.params.source || "close";
@@ -679,6 +727,17 @@ export const DEFAULT_INDICATOR_CONFIGS: Record<string, Omit<IndicatorConfig, "id
       middle: { color: "#38bdf8", lineWidth: 1.5, lineStyle: "solid" },
       upper: { color: "#38bdf8", lineWidth: 1, lineStyle: "dashed" },
       lower: { color: "#38bdf8", lineWidth: 1, lineStyle: "dashed" }
+    }
+  },
+  Fractals: {
+    type: "Fractals",
+    name: "Williams Fractals",
+    visible: true,
+    isOverlay: true,
+    params: { period: 5 },
+    styles: {
+      up: { color: "#10b981", lineWidth: 2, lineStyle: "solid" },
+      down: { color: "#ef4444", lineWidth: 2, lineStyle: "solid" }
     }
   },
   RSI: {
