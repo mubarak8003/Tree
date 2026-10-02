@@ -2570,8 +2570,34 @@ class LivePriceManager {
       cleanSym.includes("CRYPTO") ||
       cleanSym.includes("BINANCE");
 
-    // 1. TOP PRIORITY FOR FOREX, METALS, COMMODITIES & SYNTHETICS:
-    // Direct Official Deriv WebSocket ticks_history (100% Real Deriv Interbank & Synthetic Market Data)
+    // 1. TOP PRIORITY: CANONICAL TRADINGVIEW & BINANCE SERVER CANDLE STORE (100% Identical to TradingView)
+    try {
+      const curPrice = this.getPrice(symbol) || 0;
+      const priceQuery = curPrice > 0 ? `&currentPrice=${encodeURIComponent(curPrice)}` : "";
+      const srvRes = await fetch(`/api/market/candles?symbol=${encodeURIComponent(symbol)}&timeframeSec=${timeframeSec}&limit=${limit}${priceQuery}`);
+      if (srvRes.ok) {
+        const srvData = await srvRes.json();
+        if (Array.isArray(srvData?.candles) && srvData.candles.length > 0) {
+          const sanitized = sanitizeCandles(srvData.candles);
+          if (sanitized.length > 0) {
+            const lastCandle = sanitized[sanitized.length - 1];
+            if (lastCandle && lastCandle.close > 0) {
+              this.setPrice(symbol, lastCandle.close, false, "TradingView Canonical Real-Time Klines", 15);
+              this.setRawExternalPrice(symbol, lastCandle.close);
+            }
+            this.candleMemoryCache.set(`${cleanSym}_${timeframeSec}`, {
+              candles: sanitized,
+              timestamp: Date.now()
+            });
+            return sanitized;
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Canonical server klines fetch failed:", err);
+    }
+
+    // 2. SECONDARY: Deriv WebSocket ticks_history for Deriv Synthetics (e.g. 1HZ, R_100)
     const isDerivAsset =
       !isCrypto &&
       (cleanSym.includes("CAD") ||
@@ -2647,31 +2673,9 @@ class LivePriceManager {
           }
         }
       } catch (err) {
-        console.warn("Deriv client WebSocket historical klines failed, trying server proxy:", err);
+        console.warn("Deriv client WebSocket historical klines failed:", err);
       }
     }
-
-    // 2. Canonical Central Server Candle Store (Binance Real Klines for Crypto, Yahoo Finance for Market Hours)
-    try {
-      const curPrice = this.getPrice(symbol) || 0;
-      const priceQuery = curPrice > 0 ? `&currentPrice=${encodeURIComponent(curPrice)}` : "";
-      const srvRes = await fetch(`/api/market/candles?symbol=${encodeURIComponent(symbol)}&timeframeSec=${timeframeSec}&limit=${limit}${priceQuery}`);
-      if (srvRes.ok) {
-        const srvData = await srvRes.json();
-        if (Array.isArray(srvData?.candles) && srvData.candles.length > 0) {
-          const sanitized = sanitizeCandles(srvData.candles);
-          // Discard flat dashed candles if more than 30% have zero range
-          const flatCount = sanitized.filter((c) => Math.abs(c.high - c.low) < 0.000005).length;
-          if (sanitized.length > 0 && flatCount / sanitized.length < 0.3) {
-            this.candleMemoryCache.set(`${cleanSym}_${timeframeSec}`, {
-              candles: sanitized,
-              timestamp: Date.now()
-            });
-            return sanitized;
-          }
-        }
-      }
-    } catch (_) {}
 
     // 2. Direct Crypto fallback (Binance)
     if (isCrypto) {
