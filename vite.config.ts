@@ -12,6 +12,8 @@ export default defineConfig(() => {
       },
     },
     build: {
+      outDir: 'dist',
+      emptyOutDir: true,
       chunkSizeWarningLimit: 4000,
       sourcemap: false,
     },

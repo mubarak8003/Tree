@@ -2256,6 +2256,19 @@ class LivePriceManager {
     else if (timeframeSec <= 3600) granularity = 3600;
     else granularity = 86400;
 
+    // If Deriv WS is currently in CONNECTING state (e.g. initial load of first pair), wait up to 1.5s for it to open
+    if (this.derivWs && this.derivWs.readyState === WebSocket.CONNECTING) {
+      await new Promise<void>((r) => {
+        let attempts = 0;
+        const check = () => {
+          attempts++;
+          if (!this.derivWs || this.derivWs.readyState !== WebSocket.CONNECTING || attempts > 20) r();
+          else setTimeout(check, 50);
+        };
+        setTimeout(check, 50);
+      });
+    }
+
     const reqId = ++this.derivReqSeq;
 
     return new Promise((resolve) => {
@@ -2557,26 +2570,8 @@ class LivePriceManager {
       cleanSym.includes("CRYPTO") ||
       cleanSym.includes("BINANCE");
 
-    // 1. TOP PRIORITY: Canonical Central Server Candle Store (Binomo / Quotex Standard)
-    // Guarantees all users (User A, User B on any device) see 100% IDENTICAL candles & wicks!
-    try {
-      const srvRes = await fetch(`/api/market/candles?symbol=${encodeURIComponent(symbol)}&timeframeSec=${timeframeSec}&limit=${limit}`);
-      if (srvRes.ok) {
-        const srvData = await srvRes.json();
-        if (Array.isArray(srvData?.candles) && srvData.candles.length > 0) {
-          const sanitized = sanitizeCandles(srvData.candles);
-          if (sanitized.length > 0) {
-            this.candleMemoryCache.set(`${cleanSym}_${timeframeSec}`, {
-              candles: sanitized,
-              timestamp: Date.now()
-            });
-            return sanitized;
-          }
-        }
-      }
-    } catch (_) {}
-
-    // 2. Direct Official Deriv WebSocket ticks_history fallback
+    // 1. TOP PRIORITY FOR FOREX, METALS, COMMODITIES & SYNTHETICS:
+    // Direct Official Deriv WebSocket ticks_history (100% Real Deriv Interbank & Synthetic Market Data)
     const isDerivAsset =
       !isCrypto &&
       (cleanSym.includes("CAD") ||
@@ -2620,15 +2615,21 @@ class LivePriceManager {
                   lastCandle.close = currentLive;
                   lastCandle.high = Math.max(lastCandle.high, currentLive);
                   lastCandle.low = Math.min(lastCandle.low, currentLive);
-                } else if (currentPeriod - lastCandle.time === intervalMs) {
-                  sanitized.push({
-                    time: currentPeriod,
-                    open: lastCandle.close,
-                    high: Math.max(lastCandle.close, currentLive),
-                    low: Math.min(lastCandle.close, currentLive),
-                    close: currentLive,
-                    volume: 1
-                  });
+                } else if (currentPeriod > lastCandle.time) {
+                  let prevCl = lastCandle.close;
+                  for (let t = lastCandle.time + intervalMs; t <= currentPeriod; t += intervalMs) {
+                    const isCur = t === currentPeriod;
+                    const cl = isCur ? currentLive : prevCl;
+                    sanitized.push({
+                      time: t,
+                      open: prevCl,
+                      high: Math.max(prevCl, cl),
+                      low: Math.min(prevCl, cl),
+                      close: cl,
+                      volume: 1
+                    });
+                    prevCl = cl;
+                  }
                 }
               } else if (lastCandle && lastCandle.close > 0) {
                 if (!this.getPrice(symbol) || this.getPrice(symbol) <= 0) {
@@ -2646,27 +2647,31 @@ class LivePriceManager {
           }
         }
       } catch (err) {
-        console.warn("Deriv client WebSocket historical klines failed, trying server Deriv proxy:", err);
+        console.warn("Deriv client WebSocket historical klines failed, trying server proxy:", err);
       }
+    }
 
-      // Secondary: Try server Deriv proxy directly
-      try {
-        const srvRes = await fetch(`/api/market/candles?symbol=${encodeURIComponent(symbol)}&timeframeSec=${timeframeSec}&limit=${limit}`);
-        if (srvRes.ok) {
-          const srvData = await srvRes.json();
-          if (Array.isArray(srvData?.candles) && srvData.candles.length > 0) {
-            const sanitized = sanitizeCandles(srvData.candles);
-            if (sanitized.length > 0) {
-              this.candleMemoryCache.set(`${cleanSym}_${timeframeSec}`, {
-                candles: sanitized,
-                timestamp: Date.now()
-              });
-              return sanitized;
-            }
+    // 2. Canonical Central Server Candle Store (Binance Real Klines for Crypto, Yahoo Finance for Market Hours)
+    try {
+      const curPrice = this.getPrice(symbol) || 0;
+      const priceQuery = curPrice > 0 ? `&currentPrice=${encodeURIComponent(curPrice)}` : "";
+      const srvRes = await fetch(`/api/market/candles?symbol=${encodeURIComponent(symbol)}&timeframeSec=${timeframeSec}&limit=${limit}${priceQuery}`);
+      if (srvRes.ok) {
+        const srvData = await srvRes.json();
+        if (Array.isArray(srvData?.candles) && srvData.candles.length > 0) {
+          const sanitized = sanitizeCandles(srvData.candles);
+          // Discard flat dashed candles if more than 30% have zero range
+          const flatCount = sanitized.filter((c) => Math.abs(c.high - c.low) < 0.000005).length;
+          if (sanitized.length > 0 && flatCount / sanitized.length < 0.3) {
+            this.candleMemoryCache.set(`${cleanSym}_${timeframeSec}`, {
+              candles: sanitized,
+              timestamp: Date.now()
+            });
+            return sanitized;
           }
         }
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
 
     // 2. Direct Crypto fallback (Binance)
     if (isCrypto) {

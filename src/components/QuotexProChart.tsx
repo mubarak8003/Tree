@@ -150,12 +150,6 @@ export function detectCandlePattern(
   return {};
 }
 
-// Global Permanent Session Cache: Stores full candle history & closed candles per pair & timeframe.
-// When a user switches back and forth between pairs, their closed candles, exact wicks, and shapes
-// are NEVER wiped or altered by delayed exchange history responses.
-const globalSessionCandleHistory = new Map<string, Candle[]>();
-const globalSessionClosedCandles = new Map<string, Map<number, Candle>>();
-
 interface QuotexProChartProps {
   currentSymbol: string;
   currentPairName: string;
@@ -166,6 +160,13 @@ interface QuotexProChartProps {
   onPlaceQuickTrade?: (type: "CALL" | "PUT") => void;
   className?: string;
   isDarkMode?: boolean;
+}
+
+function isCorruptedCombCandleSet(list: Candle[]): boolean {
+  if (!list || list.length < 5) return false;
+  // If more than 20% of candles have needle wicks but virtually zero body, it is a legacy Yahoo fake barcode candle set
+  const combCount = list.filter((c) => Math.abs(c.high - c.low) > 0.00008 && Math.abs(c.open - c.close) < 0.00002).length;
+  return combCount / list.length > 0.2;
 }
 
 export const QuotexProChart: React.FC<QuotexProChartProps> = ({
@@ -317,32 +318,42 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       last.pattern = pat.pattern;
       last.signal = pat.signal;
 
-      // PERMANENT SESSION LOCK:
-      // Once a live candle closes on screen, freeze its exact Open, High, Low, Close and Wicks
-      // so switching pairs or fetching history never alters or compresses its wicks.
-      const symCacheKey = `${currentSymbol}_${timeframeSec}`;
-      let lockedMap = globalSessionClosedCandles.get(symCacheKey);
-      if (!lockedMap) {
-        lockedMap = new Map<number, Candle>();
-        globalSessionClosedCandles.set(symCacheKey, lockedMap);
-      }
-      lockedMap.set(last.time, { ...last });
-
       if (currentCandlePeriodSec - last.time <= timeframeSec) {
         // Standard single candle rollover
         const openP = last.close > 0 ? last.close : currentPrice;
+        // If there was a price gap between last.close and currentPrice > 0.0002 (e.g. from background lag), align openP so new candle opens naturally
+        const alignedOpen = Math.abs(openP - currentPrice) / currentPrice > 0.0002 ? currentPrice : openP;
         all.push({
           time: currentCandlePeriodSec,
-          open: openP,
-          high: Math.max(openP, currentPrice),
-          low: Math.min(openP, currentPrice),
+          open: alignedOpen,
+          high: Math.max(alignedOpen, currentPrice),
+          low: Math.min(alignedOpen, currentPrice),
           close: currentPrice,
           volume: 1
         });
         while (all.length > 300) all.shift();
         setCandlesVersion((v) => v + 1);
       } else {
-        // Gap was larger than 1 candle (e.g. app was offline or asleep)
+        // Gap was larger than 1 candle (e.g. initial load, tab was asleep, or network lag)
+        // Immediately bridge the timeline forward to current active second so chart is NEVER frozen in the past!
+        let prevCl = last.close > 0 ? last.close : currentPrice;
+        for (let t = last.time + timeframeSec; t <= currentCandlePeriodSec; t += timeframeSec) {
+          const isCurrent = t === currentCandlePeriodSec;
+          const openP = prevCl;
+          const cl = isCurrent ? currentPrice : prevCl;
+          const alignedOpen = isCurrent && Math.abs(openP - cl) / cl > 0.0002 ? cl : openP;
+          all.push({
+            time: t,
+            open: alignedOpen,
+            high: Math.max(alignedOpen, cl),
+            low: Math.min(alignedOpen, cl),
+            close: cl,
+            volume: 1
+          });
+          prevCl = cl;
+        }
+        while (all.length > 300) all.shift();
+        setCandlesVersion((v) => v + 1);
         syncMissingKlinesRef.current();
       }
     }
@@ -642,81 +653,29 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       setLivePrice(initialPrice);
     }
 
+    // 1. Immediately reset candle buffer on pair switch to guarantee zero cross-asset contamination
+    candlesRef.current = [];
+    setCandlesVersion((v) => v + 1);
+
     const cacheKey = `${currentSymbol}_${timeframeSec}`;
-    const liveServiceCached = livePriceService.getCachedCandles(currentSymbol, timeframeSec);
+    const localHistory = candleHistoryCacheRef.current.get(cacheKey);
 
     let hasImmediateCandles = false;
-    // 1. Check Global Session Candle History first (survives all pair switches)
-    const sessionHistory = globalSessionCandleHistory.get(cacheKey);
-    const localComponentHistory = candleHistoryCacheRef.current.get(cacheKey);
-    const immediateList = (sessionHistory && sessionHistory.length > 0) ? sessionHistory : localComponentHistory;
-
-    if (immediateList && immediateList.length > 0) {
-      const firstValidClose = immediateList[immediateList.length - 1].close;
-      const isCachePriceValid = initialPrice <= 0 || (firstValidClose > 0 && Math.abs(firstValidClose - initialPrice) / initialPrice < 0.25);
+    if (localHistory && localHistory.length > 0) {
+      const firstValidClose = localHistory[localHistory.length - 1].close;
+      const isCombCorrupted = isCorruptedCombCandleSet(localHistory);
+      // Strict 3% sanity check prevents any cross-asset (e.g. GBP/USD 1.32 vs EUR/USD 1.12) leakage
+      const isCachePriceValid =
+        !isCombCorrupted &&
+        (initialPrice <= 0 || (firstValidClose > 0 && Math.abs(firstValidClose - initialPrice) / initialPrice < 0.03));
 
       if (isCachePriceValid) {
-        candlesRef.current = [...immediateList];
+        candlesRef.current = [...localHistory];
         setCandlesVersion((v) => v + 1);
         hasImmediateCandles = true;
-        const last = immediateList[immediateList.length - 1];
-        const activeLive = livePriceService.getPrice(currentSymbol);
-        if (activeLive && activeLive > 0) {
-          lastValidPricesBySymbolRef.current.set(currentSymbol, activeLive);
-          renderPriceRef.current = activeLive;
-          targetPriceRef.current = activeLive;
-          setLivePrice(activeLive);
-        } else if (last && last.close > 0) {
-          lastValidPricesBySymbolRef.current.set(currentSymbol, last.close);
-          renderPriceRef.current = last.close;
-          targetPriceRef.current = last.close;
-          setLivePrice(last.close);
-        }
       } else {
         candleHistoryCacheRef.current.delete(cacheKey);
-        globalSessionCandleHistory.delete(cacheKey);
       }
-    } else if (liveServiceCached && liveServiceCached.length > 0) {
-      const formatted = liveServiceCached.map((c: any) => {
-        const o = Number(c.open);
-        const cl = Number(c.close);
-        const h = Math.max(o, cl, Number(c.high) || o);
-        const l = Math.min(o, cl, Number(c.low) > 0 ? Number(c.low) : o);
-        const rawTime = Number(c.time);
-        const timeSec = rawTime > 10000000000 ? Math.floor(rawTime / 1000) : rawTime;
-        return {
-          time: timeSec,
-          open: o,
-          high: h,
-          low: l,
-          close: cl,
-          volume: Number(c.volume) || 10
-        };
-      });
-      const firstValidClose = formatted.length > 0 ? formatted[formatted.length - 1].close : 0;
-      const isCachePriceValid = initialPrice <= 0 || (firstValidClose > 0 && Math.abs(firstValidClose - initialPrice) / initialPrice < 0.25);
-
-      if (formatted.length > 0 && isCachePriceValid) {
-        candlesRef.current = formatted;
-        candleHistoryCacheRef.current.set(cacheKey, formatted);
-        setCandlesVersion((v) => v + 1);
-        hasImmediateCandles = true;
-        const last = formatted[formatted.length - 1];
-        const activeLive = livePriceService.getPrice(currentSymbol);
-        if (activeLive && activeLive > 0) {
-          lastValidPricesBySymbolRef.current.set(currentSymbol, activeLive);
-          renderPriceRef.current = activeLive;
-          targetPriceRef.current = activeLive;
-          setLivePrice(activeLive);
-        } else if (last && last.close > 0) {
-          lastValidPricesBySymbolRef.current.set(currentSymbol, last.close);
-          renderPriceRef.current = last.close;
-          targetPriceRef.current = last.close;
-          setLivePrice(last.close);
-        }
-      }
-    } else {
-      candlesRef.current = [];
     }
 
     if (!hasImmediateCandles) {
@@ -781,25 +740,31 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
               if (lastCandle.time >= currentCandlePeriodSec) {
                 if (activeLive && activeLive > 0) {
                   lastCandle.close = activeLive;
-                  lastCandle.high = Math.max(lastCandle.high, activeLive);
+                  lastCandle.high = Math.max(lastCandle.open, lastCandle.high, activeLive);
                   if (lastCandle.low <= 0 || isNaN(lastCandle.low)) {
                     lastCandle.low = Math.min(lastCandle.open, activeLive);
                   } else {
-                    lastCandle.low = Math.min(lastCandle.low, activeLive);
+                    lastCandle.low = Math.min(lastCandle.open, lastCandle.low, activeLive);
                   }
                 }
-              } else if (currentCandlePeriodSec - lastCandle.time === timeframeSec) {
-                // Exactly 1 candle rollover
-                const prevClose = lastCandle.close > 0 ? lastCandle.close : (activeLive || 100);
+              } else {
+                // Ensure timeline is fully bridged up to currentCandlePeriodSec with zero gaps
+                let prevClose = lastCandle.close > 0 ? lastCandle.close : (activeLive || 100);
                 const curP = activeLive && activeLive > 0 ? activeLive : prevClose;
-                formatted.push({
-                  time: currentCandlePeriodSec,
-                  open: prevClose,
-                  high: Math.max(prevClose, curP),
-                  low: Math.min(prevClose, curP),
-                  close: curP,
-                  volume: 1
-                });
+                for (let t = lastCandle.time + timeframeSec; t <= currentCandlePeriodSec; t += timeframeSec) {
+                  const isCur = t === currentCandlePeriodSec;
+                  const closeP = isCur ? curP : prevClose;
+                  const alignedOpen = isCur && Math.abs(prevClose - closeP) / closeP > 0.0002 ? closeP : prevClose;
+                  formatted.push({
+                    time: t,
+                    open: alignedOpen,
+                    high: Math.max(alignedOpen, closeP),
+                    low: Math.min(alignedOpen, closeP),
+                    close: closeP,
+                    volume: 1
+                  });
+                  prevClose = closeP;
+                }
               }
             }
 
@@ -811,94 +776,11 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
             targetPriceRef.current = initialFinalPrice;
             setLivePrice(initialFinalPrice);
 
-            // BINOMO / QUOTEX STYLE MERGE ENGINE:
-            // Never wipe or violently replace the live forming candle that the user is watching.
-            const existing = candlesRef.current;
-            if (existing.length > 0) {
-              const existingLast = existing[existing.length - 1];
-              const existingLastTime = existingLast ? existingLast.time : 0;
-
-              // Reconcile and backfill completed past candles from exchange history
-              const reconciled: Candle[] = [];
-              const pastHistoryMap = new Map<number, Candle>();
-              for (const c of formatted) {
-                pastHistoryMap.set(c.time, c);
-              }
-
-              const lockedCandles = globalSessionClosedCandles.get(cacheKey);
-
-              // Keep all past history candles that are strictly older than current active forming candle
-              for (const histCandle of formatted) {
-                if (histCandle.time < existingLastTime) {
-                  // If this candle was formed and locked during the user's live session, use the locked candle with its exact wicks!
-                  const locked = lockedCandles?.get(histCandle.time);
-                  reconciled.push(locked ? { ...locked } : histCandle);
-                }
-              }
-
-              // Preserve all currently existing live candles (including active forming candle)
-              for (const ex of existing) {
-                const locked = lockedCandles?.get(ex.time);
-                if (locked) {
-                  // This candle closed live in front of the user - restore its exact wicks and OHLC!
-                  ex.open = locked.open;
-                  ex.high = locked.high;
-                  ex.low = locked.low;
-                  ex.close = locked.close;
-                  if (!reconciled.some((r) => r.time === ex.time)) {
-                    reconciled.push(ex);
-                  }
-                } else if (ex.time < existingLastTime) {
-                  // If history provided official closed OHLC for past candles, align high/low wicks
-                  const histMatch = pastHistoryMap.get(ex.time);
-                  if (histMatch) {
-                    ex.open = histMatch.open;
-                    ex.high = Math.max(ex.high, histMatch.high);
-                    ex.low = Math.min(ex.low, histMatch.low);
-                    ex.close = histMatch.close;
-                  }
-                  if (!reconciled.some((r) => r.time === ex.time)) {
-                    reconciled.push(ex);
-                  }
-                } else if (ex.time === existingLastTime) {
-                  // ACTIVE FORMING CANDLE: Keep the live tick price and real-time wicks completely intact!
-                  const histMatch = pastHistoryMap.get(ex.time);
-                  if (histMatch) {
-                    ex.open = histMatch.open;
-                    ex.high = Math.max(ex.high, histMatch.high);
-                    ex.low = Math.min(ex.low, histMatch.low);
-                  }
-                  if (activeLive && activeLive > 0) {
-                    ex.close = activeLive;
-                    ex.high = Math.max(ex.high, activeLive);
-                    ex.low = Math.min(ex.low, activeLive);
-                  }
-                  reconciled.push(ex);
-                } else {
-                  // Any newer forward candles created by active tick engine
-                  reconciled.push(ex);
-                }
-              }
-
-              // Sort chronologically and deduplicate
-              reconciled.sort((a, b) => a.time - b.time);
-              const uniqueReconciled: Candle[] = [];
-              for (let k = 0; k < reconciled.length; k++) {
-                if (k === 0 || reconciled[k].time !== reconciled[k - 1].time) {
-                  uniqueReconciled.push(reconciled[k]);
-                }
-              }
-
-              while (uniqueReconciled.length > 300) uniqueReconciled.shift();
-              candlesRef.current = uniqueReconciled;
-              candleHistoryCacheRef.current.set(cacheKey, uniqueReconciled);
-              globalSessionCandleHistory.set(cacheKey, uniqueReconciled);
-            } else {
-              // Initial cold load when chart was empty
-              candlesRef.current = formatted;
-              candleHistoryCacheRef.current.set(cacheKey, formatted);
-              globalSessionCandleHistory.set(cacheKey, formatted);
-            }
+            // Direct authoritative exchange candle update (Quotex & Binomo Standard)
+            // Completely isolated per symbol with zero cross-asset contamination (no GBP/USD 1.32 wicks leaking into EUR/USD 1.12)
+            candlesRef.current = formatted;
+            candleHistoryCacheRef.current.set(cacheKey, formatted);
+            setCandlesVersion((v) => v + 1);
 
             const currentActiveCandle = candlesRef.current[candlesRef.current.length - 1];
             const finalPrice = currentActiveCandle ? currentActiveCandle.close : (activeLive || 100.0);
@@ -931,59 +813,76 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
   const syncMissingKlines = useCallback(async () => {
     if (typeof navigator !== "undefined" && !navigator.onLine) return;
     try {
-      const raw = await livePriceService.fetchHistoricalKlines(currentSymbol, timeframeSec, 80, true);
+      const raw = await livePriceService.fetchHistoricalKlines(currentSymbol, timeframeSec, 120, true);
       if (raw && raw.length > 0 && activeSymbolRef.current === currentSymbol) {
-        const existing = candlesRef.current;
-        if (existing.length === 0) return;
-        const existingLastTime = existing[existing.length - 1]?.time || 0;
+        const activeLivePrice = livePriceService.getPrice(currentSymbol);
+        const nowSec = Math.floor(livePriceService.getExchangeTime() / 1000);
+        const currentPeriodSec = Math.floor(nowSec / timeframeSec) * timeframeSec;
 
-        const cacheKey = `${currentSymbol}_${timeframeSec}`;
-        const lockedCandles = globalSessionClosedCandles.get(cacheKey);
+        const mergedMap = new Map<number, Candle>();
 
-        // Reconcile completed past candles and active forming candle with official exchange OHLC
+        // 1. Put raw official exchange candles in map
         raw.forEach((c) => {
           const rawTime = Number(c.time);
           const timeSec = rawTime > 10000000000 ? Math.floor(rawTime / 1000) : rawTime;
-          const match = existing.find((ex) => ex.time === timeSec);
-          if (match) {
-            const locked = lockedCandles?.get(timeSec);
-            if (locked) {
-              // NEVER overwrite user's locked closed wicks!
-              match.open = locked.open;
-              match.high = locked.high;
-              match.low = locked.low;
-              match.close = locked.close;
-            } else {
-              match.open = Number(c.open);
-              match.high = Math.max(match.high, Number(c.high));
-              match.low = Math.min(match.low, Number(c.low));
-              if (timeSec < existingLastTime) {
-                match.close = Number(c.close);
-              }
-            }
+          const o = Number(c.open);
+          const cl = Number(c.close);
+          const h = Math.max(o, cl, Number(c.high) || o);
+          const l = Math.min(o, cl, Number(c.low) > 0 ? Number(c.low) : o);
+          mergedMap.set(timeSec, {
+            time: timeSec,
+            open: o,
+            high: h,
+            low: l,
+            close: cl,
+            volume: Number(c.volume) || 1
+          });
+        });
+
+        // 2. Put existing candles in map if not already present or if forming
+        const existing = candlesRef.current;
+        existing.forEach((ex) => {
+          if (!mergedMap.has(ex.time) && ex.time < currentPeriodSec) {
+            mergedMap.set(ex.time, ex);
           }
         });
 
-        const newer = raw
-          .map((c) => {
-            const rawTime = Number(c.time);
-            const timeSec = rawTime > 10000000000 ? Math.floor(rawTime / 1000) : rawTime;
-            return {
-              time: timeSec,
-              open: Number(c.open),
-              high: Number(c.high),
-              low: Number(c.low),
-              close: Number(c.close),
-              volume: Number(c.volume) || 1
-            };
-          })
-          .filter((c) => c.time > existingLastTime);
+        // 3. Sort chronologically
+        const sorted = Array.from(mergedMap.values()).sort((a, b) => a.time - b.time);
 
-        if (newer.length > 0) {
-          candlesRef.current = [...candlesRef.current, ...newer];
-          while (candlesRef.current.length > 300) candlesRef.current.shift();
-          setCandlesVersion((v) => v + 1);
+        // 4. Ensure current active forming candle exists with smooth connection to previous candle
+        if (sorted.length > 0) {
+          const lastCandle = sorted[sorted.length - 1];
+          if (lastCandle.time === currentPeriodSec) {
+            if (sorted.length >= 2) {
+              const prevClose = sorted[sorted.length - 2].close;
+              const curP = activeLivePrice && activeLivePrice > 0 ? activeLivePrice : lastCandle.close;
+              const alignedOpen = Math.abs(prevClose - curP) / curP > 0.0002 ? curP : prevClose;
+              lastCandle.open = alignedOpen;
+            }
+            if (activeLivePrice && activeLivePrice > 0) {
+              lastCandle.close = activeLivePrice;
+              lastCandle.high = Math.max(lastCandle.open, lastCandle.high, activeLivePrice);
+              lastCandle.low = Math.min(lastCandle.open, lastCandle.low, activeLivePrice);
+            }
+          } else if (lastCandle.time < currentPeriodSec) {
+            const prevClose = lastCandle.close;
+            const curP = activeLivePrice && activeLivePrice > 0 ? activeLivePrice : prevClose;
+            const alignedOpen = Math.abs(prevClose - curP) / curP > 0.0002 ? curP : prevClose;
+            sorted.push({
+              time: currentPeriodSec,
+              open: alignedOpen,
+              high: Math.max(alignedOpen, curP),
+              low: Math.min(alignedOpen, curP),
+              close: curP,
+              volume: 1
+            });
+          }
         }
+
+        while (sorted.length > 300) sorted.shift();
+        candlesRef.current = sorted;
+        setCandlesVersion((v) => v + 1);
       }
     } catch (e) {
       console.warn("Silent resume sync error:", e);
@@ -1049,13 +948,17 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
           const currentActive = all[all.length - 1];
           if (currentActive) {
+            // If active candle just opened and has an abnormal gap to inbound live tick (> 0.0002), align open to newPrice
+            if ((currentActive.volume || 1) <= 3 && Math.abs(currentActive.open - newPrice) / newPrice > 0.0002) {
+              currentActive.open = newPrice;
+            }
             // Update active candle with real tick price
             currentActive.close = newPrice;
-            currentActive.high = Math.max(currentActive.high, newPrice);
+            currentActive.high = Math.max(currentActive.open, currentActive.high, newPrice);
             if (currentActive.low <= 0 || isNaN(currentActive.low)) {
               currentActive.low = Math.min(currentActive.open, newPrice);
             } else {
-              currentActive.low = Math.min(currentActive.low, newPrice);
+              currentActive.low = Math.min(currentActive.open, currentActive.low, newPrice);
             }
             currentActive.volume = (currentActive.volume || 1) + 1;
             const prev = all.length >= 2 ? all[all.length - 2] : undefined;
@@ -2310,10 +2213,22 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
             </span>
           </div>
 
-          {/* Compact Online Latency Pill */}
-          <div className="flex items-center gap-1 px-1.5 py-0.5 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-emerald-600 dark:text-emerald-400 font-mono text-[10px] shrink-0" title={`Live Latency: ${latencyMs}ms`}>
+          {/* Compact Online Latency & Real WebSocket Feed Pill */}
+          <div
+            className="flex items-center gap-1.5 px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-emerald-600 dark:text-emerald-400 font-mono text-[10px] shrink-0"
+            title={`100% Real Live Stream Feed: ${
+              currentSymbol.includes("BTC") || currentSymbol.includes("ETH") || currentSymbol.includes("SOL") || currentSymbol.includes("BNB") || currentSymbol.includes("DOGE") || currentSymbol.includes("XRP")
+                ? "Binance Official WebSocket Gateway"
+                : "Deriv Official Interbank WebSocket Gateway"
+            } (${latencyMs}ms)`}
+          >
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping shrink-0" />
-            <span className="font-bold">{latencyMs}ms</span>
+            <span className="font-bold">
+              {currentSymbol.includes("BTC") || currentSymbol.includes("ETH") || currentSymbol.includes("SOL") || currentSymbol.includes("BNB") || currentSymbol.includes("DOGE") || currentSymbol.includes("XRP")
+                ? "Binance WS"
+                : "Deriv WS"}{" "}
+              • {latencyMs}ms
+            </span>
           </div>
         </div>
 

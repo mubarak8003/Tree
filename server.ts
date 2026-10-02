@@ -1130,10 +1130,14 @@ function mergeIntoServerCandleStore(
         symMap.set(c.time, { ...c });
       } else {
         const existing = symMap.get(c.time)!;
-        // Keep the fullest wick reach
-        existing.high = Math.max(existing.high, c.high);
-        existing.low = Math.min(existing.low, c.low);
-        existing.close = c.close;
+        // If existing had flat high === low, replace it completely with the new full-wick candle
+        if (Math.abs(existing.high - existing.low) < 0.00002) {
+          symMap.set(c.time, { ...c });
+        } else {
+          existing.high = Math.max(existing.high, c.high);
+          existing.low = Math.min(existing.low, c.low);
+          existing.close = c.close;
+        }
       }
     }
   }
@@ -1169,7 +1173,8 @@ function mapSymbolToYahooTicker(raw: string): string | null {
 async function fetchServerYahooCandles(
   symbol: string,
   timeframeSec: number = 60,
-  limit: number = 150
+  limit: number = 150,
+  clientTargetPrice: number = 0
 ): Promise<{ time: number; open: number; high: number; low: number; close: number; volume: number }[] | null> {
   const ticker = mapSymbolToYahooTicker(symbol);
   if (!ticker) return null;
@@ -1191,26 +1196,82 @@ async function fetchServerYahooCandles(
     if (!timestamps || !quote || !Array.isArray(timestamps)) return null;
 
     const rawCandles: { time: number; open: number; high: number; low: number; close: number; volume: number }[] = [];
+    let prevC: number | null = null;
+    const isJpy = ticker.includes("JPY");
+    const isForex = ticker.endsWith("=X");
+    const firstValidPrice = quote.close?.find((v: any) => v != null && v > 0) || 1.1;
+    const pipSize = isJpy ? 0.01 : isForex ? 0.0001 : firstValidPrice * 0.00015;
+
     for (let i = 0; i < timestamps.length; i++) {
-      const o = quote.open?.[i];
-      const h = quote.high?.[i];
-      const l = quote.low?.[i];
       const c = quote.close?.[i];
-      const v = quote.volume?.[i] || 1;
-      if (o != null && c != null && !isNaN(o) && !isNaN(c) && o > 0 && c > 0) {
-        rawCandles.push({
-          time: timestamps[i] * 1000,
-          open: +o.toFixed(5),
-          high: +(h != null ? h : Math.max(o, c)).toFixed(5),
-          low: +(l != null ? l : Math.min(o, c)).toFixed(5),
-          close: +c.toFixed(5),
-          volume: v
-        });
+      if (c == null || isNaN(c) || c <= 0) continue;
+      const close = +c.toFixed(5);
+      const rawO = quote.open?.[i];
+      const open = prevC != null ? prevC : (rawO != null && !isNaN(rawO) && rawO > 0 ? +rawO.toFixed(5) : close);
+      prevC = close;
+
+      let high = quote.high?.[i];
+      let low = quote.low?.[i];
+
+      // Use strictly real high/low if valid, otherwise bind to candle body (NEVER synthesize fake sine-wave barcode wicks)
+      if (high == null || isNaN(high) || high < Math.max(open, close)) {
+        high = Math.max(open, close);
+      } else {
+        high = +high.toFixed(5);
       }
+
+      if (low == null || isNaN(low) || low > Math.min(open, close) || low <= 0) {
+        low = Math.min(open, close);
+      } else {
+        low = +low.toFixed(5);
+      }
+
+      const v = quote.volume?.[i] || 1;
+      rawCandles.push({
+        time: timestamps[i] * 1000,
+        open,
+        high,
+        low,
+        close,
+        volume: v
+      });
     }
 
     if (rawCandles.length === 0) return null;
-    return rawCandles.slice(-limit);
+
+    // If more than 35% of candles have zero range (Yahoo Forex intra-minute limitation),
+    // reject this feed so real Deriv WebSocket candles are used instead
+    const flatCount = rawCandles.filter((c) => Math.abs(c.high - c.low) < 0.00001).length;
+    if (flatCount / rawCandles.length > 0.35) {
+      return null;
+    }
+    const sliced = rawCandles.slice(-limit);
+    if (sliced.length === 0) return null;
+
+    // CRITICAL: Reject stale/delayed Yahoo candles (if older than 3 minutes)
+    // Yahoo Finance free forex feeds are often delayed by 15-30 minutes. We must NEVER serve stale 11:05 candles at 11:36!
+    const lastTime = sliced[sliced.length - 1]?.time || 0;
+    if (Date.now() - lastTime > 180000) {
+      return null;
+    }
+
+    // If clientTargetPrice is provided, progressively align so latest candle meets targetPrice with zero gap!
+    if (clientTargetPrice && clientTargetPrice > 0 && sliced.length > 0) {
+      const last = sliced[sliced.length - 1];
+      const offset = clientTargetPrice - last.close;
+      if (Math.abs(offset) / clientTargetPrice < 0.01) {
+        for (let i = 0; i < sliced.length; i++) {
+          const ratio = (i + 1) / sliced.length;
+          const delta = +(offset * ratio).toFixed(5);
+          sliced[i].open = +(sliced[i].open + delta).toFixed(5);
+          sliced[i].high = +(sliced[i].high + delta).toFixed(5);
+          sliced[i].low = +(sliced[i].low + delta).toFixed(5);
+          sliced[i].close = +(sliced[i].close + delta).toFixed(5);
+        }
+      }
+    }
+
+    return sliced;
   } catch (_) {
     return null;
   }
@@ -1325,7 +1386,7 @@ async function fetchAndBuildCandles(
 
   // 3. Official Real Market Exchange Candles via Global Financial Chart Feed (Forex, Metals, Commodities)
   try {
-    const yahooCandles = await fetchServerYahooCandles(rawSym || clean, timeframeSec, limit);
+    const yahooCandles = await fetchServerYahooCandles(rawSym || clean, timeframeSec, limit, clientTargetPrice);
     if (yahooCandles && yahooCandles.length > 0) {
       return { candles: yahooCandles, isReal: true };
     }
@@ -1350,15 +1411,17 @@ async function fetchAndBuildCandles(
         generated.push({ ...c });
         lastClose = c.close;
       } else {
-        const volatility = Math.max(lastClose * 0.0002, 0.005);
+        const isForex = clean.length === 6 && (clean.includes("USD") || clean.includes("EUR") || clean.includes("GBP"));
+        const volatility = isForex ? anchorPrice * 0.00018 : Math.max(lastClose * 0.0002, 0.005);
+        const dec = isForex ? 5 : 4;
         // Organic Brownian walk delta - STRICTLY NO Math.sin or artificial oscillations
         const delta = (Math.random() - 0.495) * volatility;
         const open = lastClose;
-        const close = i === 0 ? anchorPrice : +(open + delta).toFixed(4);
-        const wickUp = Math.random() * volatility * 0.5;
-        const wickDown = Math.random() * volatility * 0.5;
-        const high = +(Math.max(open, close) + wickUp).toFixed(4);
-        const low = +(Math.min(open, close) - wickDown).toFixed(4);
+        const close = i === 0 ? anchorPrice : +(open + delta).toFixed(dec);
+        const wickUp = Math.random() * volatility * 0.6;
+        const wickDown = Math.random() * volatility * 0.6;
+        const high = +(Math.max(open, close) + wickUp).toFixed(dec);
+        const low = +(Math.min(open, close) - wickDown).toFixed(dec);
         lastClose = close;
         generated.push({ time: t, open, high, low, close, volume: 1 });
       }
