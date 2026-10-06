@@ -553,10 +553,21 @@ class LivePriceManager {
     const cacheKey = `${cleanSym}_${timeframeSec}`;
     const cached = this.candleMemoryCache.get(cacheKey);
     if (cached && cached.candles && cached.candles.length > 0) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const lastCandle = cached.candles[cached.candles.length - 1];
+      const lastCandleSec = lastCandle.time > 10000000000 ? Math.floor(lastCandle.time / 1000) : lastCandle.time;
+      // Stale check: if cache is more than 1 timeframe period old (e.g. user was on another pair), invalidate so fresh TradingView klines are loaded!
+      if (nowSec - lastCandleSec > timeframeSec * 1.5) {
+        return null;
+      }
       return cached.candles;
     }
     return null;
   }
+  private tvWs: WebSocket | null = null;
+  private isTvWsConnected = false;
+  private tvSessionId: string = "";
+  private tvSubscribedSymbols: Set<string> = new Set();
   private derivWs: WebSocket | null = null;
   private isDerivWsConnected = false;
   private derivPingInterval: any = null;
@@ -806,6 +817,7 @@ class LivePriceManager {
 
   constructor() {
     this.initPrices(this.activeAssets);
+    this.startTradingViewWebSocket();
     this.startDerivWebSocket();
     this.startBinanceWebSocket();
     this.startMicroTickerAndRestLoops();
@@ -899,6 +911,11 @@ class LivePriceManager {
    */
   public reconnectAndRefresh() {
     try {
+      // 0. Re-verify TradingView WebSocket
+      if (!this.tvWs || this.tvWs.readyState !== WebSocket.OPEN) {
+        this.startTradingViewWebSocket();
+      }
+
       // 1. Re-verify Deriv WebSocket
       if (!this.derivWs || this.derivWs.readyState !== WebSocket.OPEN) {
         this.startDerivWebSocket();
@@ -1327,7 +1344,120 @@ class LivePriceManager {
     }
   }
 
-  // 1b. Deriv Official Interbank WebSocket stream for Real-Time Forex & Metals Ticks with 15-Second Ping Heartbeat Engine
+  // 1b. Direct Official TradingView WebSocket Real-Time Quote Stream (Sub-second live interbank ticks)
+  public mapToTvSymbol(symbol: string): string {
+    const clean = symbol.toUpperCase().replace(/^(FX:|OANDA:|TVC:|CURRENCYCOM:|BINANCE:|NSE:|FX_IDC:|DERIV:)/, "").replace(/[^A-Z0-9]/g, "");
+    if (clean.includes("XAU") || clean.includes("GOLD")) return "OANDA:XAUUSD";
+    if (clean.includes("XAG") || clean.includes("SILVER")) return "OANDA:XAGUSD";
+    if (clean.includes("USOIL") || clean.includes("OIL") || clean.includes("CRUDE")) return "TVC:USOIL";
+    if (clean.includes("BTC")) return "BINANCE:BTCUSDT";
+    if (clean.includes("ETH")) return "BINANCE:ETHUSDT";
+    if (clean.includes("SOL")) return "BINANCE:SOLUSDT";
+    if (clean.includes("DOGE")) return "BINANCE:DOGEUSDT";
+    if (clean.includes("XRP")) return "BINANCE:XRPUSDT";
+    if (clean.includes("BNB")) return "BINANCE:BNBUSDT";
+    if (clean.includes("US500") || clean.includes("SPX")) return "TVC:SPX";
+    if (clean.includes("US100") || clean.includes("NAS100")) return "TVC:NDX";
+    if (clean.includes("INR") || clean.includes("USDINR")) return "FX_IDC:USDINR";
+    if (clean.length === 6) return `FX:${clean}`;
+    return symbol.includes(":") ? symbol : `FX:${clean}`;
+  }
+
+  public subscribeSymbolToTradingView(symbol: string) {
+    if (!symbol) return;
+    const tvSym = this.mapToTvSymbol(symbol);
+    if (!this.tvSubscribedSymbols.has(tvSym)) {
+      this.tvSubscribedSymbols.add(tvSym);
+      if (this.tvWs && this.tvWs.readyState === WebSocket.OPEN && this.tvSessionId) {
+        try {
+          const msg = JSON.stringify({ m: "quote_add_symbols", p: [this.tvSessionId, tvSym] });
+          this.tvWs.send("~m~" + msg.length + "~m~" + msg);
+        } catch (_) {}
+      }
+    }
+  }
+
+  private startTradingViewWebSocket() {
+    if (typeof window === "undefined") return;
+    try {
+      if (this.tvWs) {
+        try { this.tvWs.close(); } catch (_) {}
+      }
+      this.tvWs = new WebSocket("wss://data.tradingview.com/socket.io/websocket");
+      this.tvSessionId = "qs_" + Math.random().toString(36).substring(2, 10);
+      const send = (m: string, p: any[]) => {
+        if (this.tvWs && this.tvWs.readyState === WebSocket.OPEN) {
+          try {
+            const msg = JSON.stringify({ m, p });
+            this.tvWs.send("~m~" + msg.length + "~m~" + msg);
+          } catch (_) {}
+        }
+      };
+
+      this.tvWs.onopen = () => {
+        this.isTvWsConnected = true;
+        send("set_auth_token", ["unauthorized_user_token"]);
+        send("quote_create_session", [this.tvSessionId]);
+        send("quote_set_fields", [this.tvSessionId, "lp", "ch", "chp", "bid", "ask", "high_price", "low_price"]);
+
+        const defaults = [
+          "FX:EURUSD", "FX:GBPUSD", "FX:USDJPY", "FX:AUDUSD", "FX:USDCAD", "FX:USDCHF", "FX:NZDUSD",
+          "FX:EURGBP", "FX:EURJPY", "FX:GBPJPY", "OANDA:XAUUSD", "OANDA:XAGUSD", "TVC:USOIL"
+        ];
+        defaults.forEach((s) => this.tvSubscribedSymbols.add(s));
+        send("quote_add_symbols", [this.tvSessionId, ...defaults]);
+      };
+
+      this.tvWs.onmessage = (event) => {
+        const raw = event.data?.toString() || "";
+        if (raw.includes("~h~")) {
+          try { this.tvWs?.send(raw); } catch (_) {}
+          return;
+        }
+        const parts = raw.split(/~m~\d+~m~/).filter(Boolean);
+        for (const p of parts) {
+          try {
+            const parsed = JSON.parse(p);
+            if (parsed.m === "qsd" && parsed.p?.[1]?.n) {
+              const tvSym = parsed.p[1].n;
+              const tickPrice = parsed.p[1].v?.lp;
+              if (typeof tickPrice === "number" && tickPrice > 0) {
+                const clean = tvSym.replace(/^(FX:|OANDA:|TVC:|BINANCE:|FX_IDC:)/, "").replace(/[^A-Z0-9]/g, "");
+                const fxSym = `FX:${clean}`;
+                this.setRawExternalPrice(tvSym, tickPrice);
+                this.setRawExternalPrice(fxSym, tickPrice);
+                this.setRawExternalPrice(clean, tickPrice);
+
+                this.setPrice(tvSym, tickPrice, false, "TradingView Official Stream", 15);
+                this.setPrice(fxSym, tickPrice, false, "TradingView Official Stream", 15);
+                this.setPrice(clean, tickPrice, false, "TradingView Official Stream", 15);
+
+                if (clean === "XAUUSD") {
+                  this.setRawExternalPrice("GOLD", tickPrice);
+                  this.setPrice("GOLD", tickPrice, false, "TradingView Official Stream", 15);
+                }
+                if (clean === "XAGUSD") {
+                  this.setRawExternalPrice("SILVER", tickPrice);
+                  this.setPrice("SILVER", tickPrice, false, "TradingView Official Stream", 15);
+                }
+                this.notifyListeners();
+              }
+            }
+          } catch (_) {}
+        }
+      };
+
+      this.tvWs.onclose = () => {
+        this.isTvWsConnected = false;
+        setTimeout(() => this.startTradingViewWebSocket(), 2500);
+      };
+      this.tvWs.onerror = () => {
+        this.isTvWsConnected = false;
+      };
+    } catch (_) {}
+  }
+
+  // 1c. Deriv Official Interbank WebSocket stream for Real-Time Forex & Metals Ticks with 15-Second Ping Heartbeat Engine
   private startDerivWebSocket() {
     try {
       if (this.derivWs) {
@@ -1461,38 +1591,38 @@ class LivePriceManager {
               const reqTime = new Date(now - 15).toISOString();
               const respTime = new Date(now).toISOString();
 
-              let standardSym = sym.replace(/^frx/, "");
-              if (sym === "frxXAUUSD") standardSym = "XAUUSD";
-              if (sym === "frxXAGUSD") standardSym = "XAGUSD";
-              if (sym === "R_100") standardSym = "R_100";
-              if (sym === "1HZ100V") standardSym = "1HZ100V";
+              const isSynthetic = sym.startsWith("R_") || sym.includes("1HZ") || sym.includes("BOOM") || sym.includes("CRASH");
+              if (isSynthetic) {
+                this.setRawExternalPrice(sym, quote);
+                this.setPrice(sym, quote, false, "Deriv Synthetic WS", 15, reqTime, respTime);
+                this.lastRealInboundTickTime = now;
+                this.lastRealInboundBySymbol[sym] = now;
+                this.notifyListeners();
+              } else if (!this.isTvWsConnected) {
+                // Interbank fallback only if TradingView stream is temporarily unavailable
+                let standardSym = sym.replace(/^frx/, "");
+                if (sym === "frxXAUUSD") standardSym = "XAUUSD";
+                if (sym === "frxXAGUSD") standardSym = "XAGUSD";
 
-              const fxSymbol = `FX:${standardSym}`;
-              const oandaSymbol = standardSym === "XAUUSD" ? "OANDA:XAUUSD" : standardSym === "XAGUSD" ? "TVC:SILVER" : `FX:${standardSym}`;
+                const fxSymbol = `FX:${standardSym}`;
+                const oandaSymbol = standardSym === "XAUUSD" ? "OANDA:XAUUSD" : standardSym === "XAGUSD" ? "TVC:SILVER" : `FX:${standardSym}`;
 
-              this.setRawExternalPrice(sym, quote);
-              this.setRawExternalPrice(standardSym, quote);
-              this.setRawExternalPrice(fxSymbol, quote);
-              this.setRawExternalPrice(oandaSymbol, quote);
+                this.setRawExternalPrice(sym, quote);
+                this.setRawExternalPrice(standardSym, quote);
+                this.setRawExternalPrice(fxSymbol, quote);
+                this.setRawExternalPrice(oandaSymbol, quote);
 
-              this.setPrice(standardSym, quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
-              this.setPrice(fxSymbol, quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
-              this.setPrice(oandaSymbol, quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
-              this.setPrice(sym, quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
+                this.setPrice(standardSym, quote, false, "Interbank Fallback WS", 15, reqTime, respTime);
+                this.setPrice(fxSymbol, quote, false, "Interbank Fallback WS", 15, reqTime, respTime);
+                this.setPrice(oandaSymbol, quote, false, "Interbank Fallback WS", 15, reqTime, respTime);
+                this.setPrice(sym, quote, false, "Interbank Fallback WS", 15, reqTime, respTime);
 
-              if (standardSym === "XAUUSD") {
-                this.setRawExternalPrice("GOLD", quote);
-                this.setPrice("GOLD", quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
+                this.lastRealInboundTickTime = now;
+                this.lastRealInboundBySymbol[sym] = now;
+                this.lastRealInboundBySymbol[standardSym] = now;
+                this.lastRealInboundBySymbol[fxSymbol] = now;
+                this.notifyListeners();
               }
-              if (standardSym === "XAGUSD") {
-                this.setRawExternalPrice("SILVER", quote);
-                this.setPrice("SILVER", quote, false, "Deriv Real Interbank WS", 15, reqTime, respTime);
-              }
-
-              this.lastRealInboundTickTime = now;
-              this.lastRealInboundBySymbol[sym] = now;
-              this.lastRealInboundBySymbol[standardSym] = now;
-              this.lastRealInboundBySymbol[fxSymbol] = now;
 
               this.recordSuccess("deriv_ws", 15, reqTime, respTime);
               this.recordSuccess("tradingview", 20, reqTime, respTime);
@@ -1648,6 +1778,7 @@ class LivePriceManager {
         this.setNetworkStatus(true);
         this.providerStats.binance_ws.status = "Connecting";
         this.providerStats.deriv_ws.status = "Syncing";
+        this.startTradingViewWebSocket();
         this.startBinanceWebSocket();
         this.startDerivWebSocket();
         this.fetchAllLivePricesREST();

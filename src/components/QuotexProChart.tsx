@@ -270,6 +270,8 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
   const [isOnline, setIsOnline] = useState<boolean>(() => livePriceService.isOnline());
   const isOnlineRef = useRef<boolean>(livePriceService.isOnline());
   const syncMissingKlinesRef = useRef<() => void>(() => {});
+  const smoothScaleMinRef = useRef<number | null>(null);
+  const smoothScaleMaxRef = useRef<number | null>(null);
 
   useEffect(() => {
     const unsubNet = livePriceService.subscribeNetworkStatus((online) => {
@@ -319,15 +321,13 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       last.signal = pat.signal;
 
       if (currentCandlePeriodSec - last.time <= timeframeSec) {
-        // Standard single candle rollover
+        // Standard single candle rollover: new candle opens exactly at last.close
         const openP = last.close > 0 ? last.close : currentPrice;
-        // If there was a price gap between last.close and currentPrice > 0.0002 (e.g. from background lag), align openP so new candle opens naturally
-        const alignedOpen = Math.abs(openP - currentPrice) / currentPrice > 0.0002 ? currentPrice : openP;
         all.push({
           time: currentCandlePeriodSec,
-          open: alignedOpen,
-          high: Math.max(alignedOpen, currentPrice),
-          low: Math.min(alignedOpen, currentPrice),
+          open: openP,
+          high: Math.max(openP, currentPrice),
+          low: Math.min(openP, currentPrice),
           close: currentPrice,
           volume: 1
         });
@@ -341,12 +341,11 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
           const isCurrent = t === currentCandlePeriodSec;
           const openP = prevCl;
           const cl = isCurrent ? currentPrice : prevCl;
-          const alignedOpen = isCurrent && Math.abs(openP - cl) / cl > 0.0002 ? cl : openP;
           all.push({
             time: t,
-            open: alignedOpen,
-            high: Math.max(alignedOpen, cl),
-            low: Math.min(alignedOpen, cl),
+            open: openP,
+            high: Math.max(openP, cl),
+            low: Math.min(openP, cl),
             close: cl,
             volume: 1
           });
@@ -641,8 +640,11 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     const currentSeq = ++switchSeqRef.current;
     activeSymbolRef.current = currentSymbol;
     setPanOffset(0);
+    smoothScaleMinRef.current = null;
+    smoothScaleMaxRef.current = null;
 
-    // Guarantee active Deriv WebSocket tick subscription for the selected symbol
+    // Guarantee active real-time tick subscriptions for the selected symbol
+    livePriceService.subscribeSymbolToTradingView(currentSymbol);
     livePriceService.subscribeSymbolToDeriv(currentSymbol);
 
     const initialPrice = livePriceService.getPrice(currentSymbol) || 0;
@@ -662,11 +664,15 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
     let hasImmediateCandles = false;
     if (localHistory && localHistory.length > 0) {
-      const firstValidClose = localHistory[localHistory.length - 1].close;
+      const nowSec = Math.floor(livePriceService.getExchangeTime() / 1000);
+      const lastCandle = localHistory[localHistory.length - 1];
+      const isFresh = lastCandle && (nowSec - lastCandle.time <= timeframeSec * 1.5);
+      const firstValidClose = lastCandle ? lastCandle.close : 0;
       const isCombCorrupted = isCorruptedCombCandleSet(localHistory);
-      // Strict 3% sanity check prevents any cross-asset (e.g. GBP/USD 1.32 vs EUR/USD 1.12) leakage
+      // Strict sanity check prevents any cross-asset or stale historical data
       const isCachePriceValid =
         !isCombCorrupted &&
+        isFresh &&
         (initialPrice <= 0 || (firstValidClose > 0 && Math.abs(firstValidClose - initialPrice) / initialPrice < 0.03));
 
       if (isCachePriceValid) {
@@ -690,7 +696,9 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
     const loadRealKlines = async () => {
       try {
-        const rawCandles = await livePriceService.fetchHistoricalKlines(currentSymbol, timeframeSec, 250, false);
+        // ALWAYS fetch authentic exchange klines on pair change (forceRefresh = true)
+        // so history is locked to authentic exchange data and never corrupted with stale interpolated bars
+        const rawCandles = await livePriceService.fetchHistoricalKlines(currentSymbol, timeframeSec, 250, true);
         if (
           isCancelled ||
           switchSeqRef.current !== currentSeq ||
@@ -813,7 +821,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
   const syncMissingKlines = useCallback(async () => {
     if (typeof navigator !== "undefined" && !navigator.onLine) return;
     try {
-      const raw = await livePriceService.fetchHistoricalKlines(currentSymbol, timeframeSec, 120, true);
+      const raw = await livePriceService.fetchHistoricalKlines(currentSymbol, timeframeSec, 250, true);
       if (raw && raw.length > 0 && activeSymbolRef.current === currentSymbol) {
         const activeLivePrice = livePriceService.getPrice(currentSymbol);
         const nowSec = Math.floor(livePriceService.getExchangeTime() / 1000);
@@ -821,45 +829,41 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
         const mergedMap = new Map<number, Candle>();
 
-        // 1. Put raw official exchange candles in map
+        // 1. Binomo & Quotex Standard: Existing candles on screen are IMMUTABLE!
+        // First put ALL existing candles into mergedMap so their shapes/wicks NEVER mutate on live screen
+        const existing = candlesRef.current;
+        existing.forEach((ex) => {
+          mergedMap.set(ex.time, { ...ex });
+        });
+
+        // 2. Only add MISSING candles from raw that don't already exist in mergedMap
         raw.forEach((c) => {
           const rawTime = Number(c.time);
           const timeSec = rawTime > 10000000000 ? Math.floor(rawTime / 1000) : rawTime;
-          const o = Number(c.open);
-          const cl = Number(c.close);
-          const h = Math.max(o, cl, Number(c.high) || o);
-          const l = Math.min(o, cl, Number(c.low) > 0 ? Number(c.low) : o);
-          mergedMap.set(timeSec, {
-            time: timeSec,
-            open: o,
-            high: h,
-            low: l,
-            close: cl,
-            volume: Number(c.volume) || 1
-          });
-        });
-
-        // 2. Put existing candles in map if not already present or if forming
-        const existing = candlesRef.current;
-        existing.forEach((ex) => {
-          if (!mergedMap.has(ex.time) && ex.time < currentPeriodSec) {
-            mergedMap.set(ex.time, ex);
+          if (!mergedMap.has(timeSec)) {
+            const o = Number(c.open);
+            const cl = Number(c.close);
+            const h = Math.max(o, cl, Number(c.high) || o);
+            const l = Math.min(o, cl, Number(c.low) > 0 ? Number(c.low) : o);
+            mergedMap.set(timeSec, {
+              time: timeSec,
+              open: o,
+              high: h,
+              low: l,
+              close: cl,
+              volume: Number(c.volume) || 1
+            });
           }
         });
 
         // 3. Sort chronologically
         const sorted = Array.from(mergedMap.values()).sort((a, b) => a.time - b.time);
 
-        // 4. Ensure current active forming candle exists with smooth connection to previous candle
+        // 4. Ensure current active forming candle exists with locked open price
         if (sorted.length > 0) {
           const lastCandle = sorted[sorted.length - 1];
           if (lastCandle.time === currentPeriodSec) {
-            if (sorted.length >= 2) {
-              const prevClose = sorted[sorted.length - 2].close;
-              const curP = activeLivePrice && activeLivePrice > 0 ? activeLivePrice : lastCandle.close;
-              const alignedOpen = Math.abs(prevClose - curP) / curP > 0.0002 ? curP : prevClose;
-              lastCandle.open = alignedOpen;
-            }
+            // Keep lastCandle.open strictly locked!
             if (activeLivePrice && activeLivePrice > 0) {
               lastCandle.close = activeLivePrice;
               lastCandle.high = Math.max(lastCandle.open, lastCandle.high, activeLivePrice);
@@ -868,12 +872,11 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
           } else if (lastCandle.time < currentPeriodSec) {
             const prevClose = lastCandle.close;
             const curP = activeLivePrice && activeLivePrice > 0 ? activeLivePrice : prevClose;
-            const alignedOpen = Math.abs(prevClose - curP) / curP > 0.0002 ? curP : prevClose;
             sorted.push({
               time: currentPeriodSec,
-              open: alignedOpen,
-              high: Math.max(alignedOpen, curP),
-              low: Math.min(alignedOpen, curP),
+              open: prevClose,
+              high: Math.max(prevClose, curP),
+              low: Math.min(prevClose, curP),
               close: curP,
               volume: 1
             });
@@ -882,7 +885,6 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
         while (sorted.length > 300) sorted.shift();
         candlesRef.current = sorted;
-        setCandlesVersion((v) => v + 1);
       }
     } catch (e) {
       console.warn("Silent resume sync error:", e);
@@ -948,11 +950,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
 
           const currentActive = all[all.length - 1];
           if (currentActive) {
-            // If active candle just opened and has an abnormal gap to inbound live tick (> 0.0002), align open to newPrice
-            if ((currentActive.volume || 1) <= 3 && Math.abs(currentActive.open - newPrice) / newPrice > 0.0002) {
-              currentActive.open = newPrice;
-            }
-            // Update active candle with real tick price
+            // Update active candle with real tick price (open price is strictly locked!)
             currentActive.close = newPrice;
             currentActive.high = Math.max(currentActive.open, currentActive.high, newPrice);
             if (currentActive.low <= 0 || isNaN(currentActive.low)) {
@@ -973,7 +971,7 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
     return () => {
       unsub();
     };
-  }, [currentSymbol, timeframeSec, syncMissingKlines]);
+  }, [currentSymbol, timeframeSec]);
 
   // Main Canvas Rendering Engine
   useEffect(() => {
@@ -1131,9 +1129,21 @@ export const QuotexProChart: React.FC<QuotexProChartProps> = ({
       }
 
       const pBuffer = pRange * 0.14;
-      const scaleMin = minP - pBuffer;
-      const scaleMax = maxP + pBuffer;
-      const scaleRange = scaleMax - scaleMin;
+      const targetScaleMin = minP - pBuffer;
+      const targetScaleMax = maxP + pBuffer;
+
+      // Binomo & Quotex Smooth Scale Damping (prevents historical candles from jittering/jumping on every tick)
+      if (smoothScaleMinRef.current === null || !isFinite(smoothScaleMinRef.current)) {
+        smoothScaleMinRef.current = targetScaleMin;
+        smoothScaleMaxRef.current = targetScaleMax;
+      } else {
+        smoothScaleMinRef.current += (targetScaleMin - smoothScaleMinRef.current) * 0.12;
+        smoothScaleMaxRef.current += (targetScaleMax - smoothScaleMaxRef.current) * 0.12;
+      }
+
+      const scaleMin = smoothScaleMinRef.current;
+      const scaleMax = smoothScaleMaxRef.current;
+      const scaleRange = Math.max(scaleMax - scaleMin, 0.00001);
 
       const getY = (price: number) => {
         return chartHeight - ((price - scaleMin) / scaleRange) * chartHeight;

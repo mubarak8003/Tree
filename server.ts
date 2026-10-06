@@ -151,6 +151,82 @@ function startServerBinanceWS() {
   }
 }
 
+// Start Server-Side TradingView Real-Time Tick Streamer
+let serverTradingViewWs: WebSocket | null = null;
+function startServerTradingViewWS() {
+  try {
+    const ws = new WebSocket("wss://data.tradingview.com/socket.io/websocket", {
+      headers: { "Origin": "https://data.tradingview.com", "User-Agent": "Mozilla/5.0" }
+    });
+    serverTradingViewWs = ws;
+    const send = (m: string, p: any[]) => {
+      try {
+        const msg = JSON.stringify({ m, p });
+        ws.send("~m~" + msg.length + "~m~" + msg);
+      } catch (_) {}
+    };
+    const qs = "qs_" + Math.random().toString(36).substring(2, 10);
+
+    ws.on("open", () => {
+      console.log("[Server Live Feed] TradingView Real-Time WebSocket Connected.");
+      send("set_auth_token", ["unauthorized_user_token"]);
+      send("quote_create_session", [qs]);
+      send("quote_set_fields", [qs, "lp", "ch", "chp", "bid", "ask", "high_price", "low_price"]);
+      send("quote_add_symbols", [
+        qs,
+        "FX:EURUSD", "FX:GBPUSD", "FX:USDJPY", "FX:AUDUSD", "FX:USDCAD", "FX:USDCHF", "FX:NZDUSD",
+        "FX:EURGBP", "FX:EURJPY", "FX:GBPJPY", "OANDA:XAUUSD", "OANDA:XAGUSD", "TVC:USOIL", "FX_IDC:USDINR"
+      ]);
+    });
+
+    ws.on("message", (raw) => {
+      const str = raw.toString();
+      if (str.includes("~h~")) {
+        try { ws.send(str); } catch (_) {}
+        return;
+      }
+      const parts = str.split(/~m~\d+~m~/).filter(Boolean);
+      for (const p of parts) {
+        try {
+          const parsed = JSON.parse(p);
+          if (parsed.m === "qsd" && parsed.p?.[1]?.n) {
+            const sym = parsed.p[1].n;
+            const tickPrice = parsed.p[1].v?.lp;
+            if (typeof tickPrice === "number" && tickPrice > 0) {
+              const clean = sym.replace(/^(FX:|OANDA:|TVC:|BINANCE:|FX_IDC:)/, "").replace(/[^A-Z0-9]/g, "");
+              cachedForexRates[sym] = tickPrice;
+              cachedForexRates[clean] = tickPrice;
+              cachedForexRates[`FX:${clean}`] = tickPrice;
+              setServerPrice(sym, tickPrice);
+              setServerPrice(clean, tickPrice);
+              setServerPrice(`FX:${clean}`, tickPrice);
+              if (clean === "XAUUSD") {
+                cachedForexRates["GOLD"] = tickPrice;
+                setServerPrice("GOLD", tickPrice);
+              }
+              if (clean === "XAGUSD") {
+                cachedForexRates["SILVER"] = tickPrice;
+                setServerPrice("SILVER", tickPrice);
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    });
+
+    ws.on("error", () => {
+      try { ws.terminate(); } catch (_) {}
+    });
+
+    ws.on("close", () => {
+      serverTradingViewWs = null;
+      setTimeout(startServerTradingViewWS, 3000);
+    });
+  } catch (_) {
+    setTimeout(startServerTradingViewWS, 5000);
+  }
+}
+
 // Start Server-Side Deriv WebSocket & Candle Fetch Engine
 let serverDerivWs: WebSocket | null = null;
 let serverDerivReqSeq = 0;
@@ -521,6 +597,7 @@ function startServerDerivWS() {
 
 // Start price feeds on server launch
 startServerBinanceWS();
+startServerTradingViewWS();
 startServerDerivWS();
 
 // =========================================================================
@@ -1130,14 +1207,12 @@ function mergeIntoServerCandleStore(
         symMap.set(c.time, { ...c });
       } else {
         const existing = symMap.get(c.time)!;
-        // If existing had flat high === low, replace it completely with the new full-wick candle
-        if (Math.abs(existing.high - existing.low) < 0.00002) {
-          symMap.set(c.time, { ...c });
-        } else {
-          existing.high = Math.max(existing.high, c.high);
-          existing.low = Math.min(existing.low, c.low);
-          existing.close = c.close;
-        }
+        // Lock to authentic incoming candle values without distorting
+        existing.open = c.open;
+        existing.high = c.high;
+        existing.low = c.low;
+        existing.close = c.close;
+        existing.volume = c.volume;
       }
     }
   }
